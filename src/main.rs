@@ -288,6 +288,18 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
 
+# Agent panel row templates. Exactly two entries: one per rendered line of each
+# agent entry. Fields: {icon} {space} {tab} {status} {agent} {custom}. A field
+# chunk with an empty value is dropped, including any literal prefix, so
+# "{ · tab}" adds nothing when a pane has no tab. Optional style role after a
+# colon: name, status, muted (e.g. "{agent:muted}"). Use {{ and }} for literal
+# braces.
+# [ui.agent_panel]
+# rows = [
+#   " {icon} {space}{ · tab}",
+#   "   {status}{ · agent}{ · custom}",
+# ]
+
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)
 # accent = "cyan"

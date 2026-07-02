@@ -223,6 +223,31 @@ fn agent_panel_sort_from_config(
     }
 }
 
+/// Compile the configured agent-panel row templates. Requires exactly two
+/// rows; a wrong count or an unparseable row falls back to the built-in
+/// default for that slot so a bad config never breaks the sidebar.
+fn agent_panel_row_templates_from_config(rows: &[String]) -> [crate::ui::RowTemplate; 2] {
+    let mut templates = crate::ui::RowTemplate::default_agent_panel_rows();
+    if rows.len() != 2 {
+        tracing::warn!(
+            count = rows.len(),
+            "ui.agent_panel.rows must have exactly 2 entries; using defaults"
+        );
+        return templates;
+    }
+    for (idx, row) in rows.iter().enumerate() {
+        match crate::ui::RowTemplate::parse(row) {
+            Ok(template) => templates[idx] = template,
+            Err(error) => tracing::warn!(
+                row = idx,
+                %error,
+                "invalid ui.agent_panel row template; using default for this row"
+            ),
+        }
+    }
+    templates
+}
+
 /// Parse the configured agent name list into a deduplicated set of `Agent`
 /// values. Unknown agent names are silently dropped so a typo cannot disable
 /// other valid entries.
@@ -443,6 +468,8 @@ impl App {
         };
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
+        let agent_panel_row_templates =
+            agent_panel_row_templates_from_config(&config.ui.agent_panel.rows);
 
         // Validate sidebar bounds before they reach any `u16::clamp(min, max)`
         // call: `clamp` panics when `min > max`. On bad config, fall back to
@@ -591,6 +618,7 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             agent_panel_sort,
+            agent_panel_row_templates,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             right_click_passthrough_modifiers: config.ui.right_click_passthrough_modifiers(),
@@ -1365,6 +1393,8 @@ impl App {
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.agent_panel_sort =
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
+                self.state.agent_panel_row_templates =
+                    agent_panel_row_templates_from_config(&config.ui.agent_panel.rows);
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {

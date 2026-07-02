@@ -106,6 +106,38 @@ impl AgentPanelSortConfig {
     }
 }
 
+/// Built-in agent-panel row templates. These reproduce Herdr's default two-row
+/// layout and are parsed by the UI's row-template engine.
+pub const DEFAULT_AGENT_PANEL_ROWS: [&str; 2] = [
+    " {icon} {space}{ · tab}",
+    "   {status}{ · agent}{ · custom}",
+];
+
+/// Agent-panel presentation options. `rows` holds exactly two row templates,
+/// one per line of each agent entry. See the UI row-template engine for the
+/// template syntax.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentPanelConfig {
+    #[serde(default = "default_agent_panel_rows")]
+    pub rows: Vec<String>,
+}
+
+fn default_agent_panel_rows() -> Vec<String> {
+    DEFAULT_AGENT_PANEL_ROWS
+        .iter()
+        .map(|row| (*row).to_string())
+        .collect()
+}
+
+impl Default for AgentPanelConfig {
+    fn default() -> Self {
+        Self {
+            rows: default_agent_panel_rows(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SidebarCollapsedModeConfig {
@@ -795,6 +827,9 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
+    /// Agent panel row templates. Exactly two entries controlling the two lines
+    /// rendered per agent entry.
+    pub agent_panel: AgentPanelConfig,
     /// Accent color for highlights, borders, and navigation UI.
     /// Accepts hex (#89b4fa), named colors (cyan, blue), or RGB (rgb(137,180,250)).
     pub accent: String,
@@ -985,6 +1020,7 @@ impl Default for UiConfig {
             pane_gaps: true,
             show_agent_labels_on_pane_borders: false,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
+            agent_panel: AgentPanelConfig::default(),
             accent: "cyan".into(),
             toast: ToastConfig::default(),
             sound: SoundConfig::default(),
@@ -1187,6 +1223,35 @@ agent_panel_scope = "current"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
+    fn agent_panel_rows_default_and_parse() {
+        let default_config = Config::default();
+        assert_eq!(
+            default_config.ui.agent_panel.rows,
+            DEFAULT_AGENT_PANEL_ROWS
+                .iter()
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        // A present-but-empty table still yields the default rows.
+        let toml = r#"
+[ui.agent_panel]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.ui.agent_panel.rows.len(), 2);
+
+        let toml = r#"
+[ui.agent_panel]
+rows = ["{icon} {space}", "{status}"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config.ui.agent_panel.rows,
+            vec!["{icon} {space}".to_string(), "{status}".to_string()]
+        );
     }
 
     #[test]
