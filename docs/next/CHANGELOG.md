@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added `ui.agent_panel.rows` to customize the two lines of each agent-panel entry with a small template language. Fields (`{icon}`, `{space}`, `{tab}`, `{status}`, `{agent}`, `{custom}`) can carry a literal prefix and a color style, e.g. `{agent:overlay0}`, `{agent:#f5c2e7}`, or `{space:text+bold}`. Colors are theme palette tokens or fixed literal colors with optional `+bold`/`+dim`/`+italic`/`+underline` modifiers.
 - Added `ui.sidebar_collapsed_mode = "hidden"` to make a collapsed sidebar use zero width while keeping the existing compact rail as the default. (#842)
 - Added `session.snapshot` to bootstrap client runtime state in one socket API response before subscribing to events.
 - Added `herdr api schema` to inspect the bundled socket API schema, with `--json` for the full JSON Schema document and `--output PATH` for file output.

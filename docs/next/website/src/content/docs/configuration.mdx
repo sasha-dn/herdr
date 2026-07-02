@@ -339,19 +339,27 @@ Available fields:
 
 | Field | Value |
 | --- | --- |
-| `{icon}` | Status icon or spinner. Keeps its state color. |
+| `{icon}` | Status icon or spinner. Always keeps its intrinsic state color. |
 | `{space}` | Space (workspace) name. |
 | `{tab}` | Tab name. Empty on single-tab spaces. |
 | `{status}` | Status text (`done`, `idle`, `working`, `blocked`), including custom state labels. |
 | `{agent}` | Detected agent name. Empty when no agent is detected. |
 | `{custom}` | Custom status set by the agent. Empty when none. |
 
-A field reference can carry a literal prefix and an optional style role:
+A field reference can carry a literal prefix and an optional style:
 
 - `{field}` inserts the field. A field with an empty value inserts nothing.
 - `{ literal field}` prepends literal text. The **whole chunk is dropped when the field is empty**, so `{ · tab}` adds nothing when a pane has no tab, avoiding a dangling separator.
-- `{field:role}` styles the field with a named role: `name` (primary label), `status` (state color), or `muted` (dim secondary text). Each field has a sensible default role. Roles resolve against the active theme, so custom rows stay consistent with your palette.
+- `{field:style}` styles the field. The style is a color with optional `+bold`, `+dim`, `+italic`, or `+underline` modifiers, e.g. `{agent:overlay0}`, `{agent:#f5c2e7}`, or `{space:text+bold}`.
 - Use `{{` and `}}` for literal braces.
+
+A color is either a **theme palette token** or a **fixed literal color**:
+
+- Palette tokens (`text`, `subtext0`, `overlay0`, `overlay1`, `surface0`, `surface1`, `surface_dim`, `panel_bg`, `accent`, `mauve`, `green`, `yellow`, `red`, `blue`, `teal`, `peach`) resolve against the active theme, so rows stay consistent when you switch themes. These are the same tokens you can override under `[theme.custom]`.
+- Literal colors are fixed regardless of theme: hex (`#f5c2e7`, `#f5f`), a named color (`cyan`, `blue`, `magenta`), or `rgb(r, g, b)`.
+- When a name matches both a palette token and a named color (for example `green`), the palette token wins. Use a hex or `rgb(...)` value for an exact fixed color.
+
+Without an explicit style, each field uses a sensible default that adapts to the active theme and whether the entry is the active pane: labels are bold, secondary detail is dim, and status text uses its live state color. The `{icon}` field always keeps its intrinsic state color and cannot be styled.
 
 Rows are truncated to the sidebar width. The layout stays fixed at two lines per entry. An invalid template or a list that is not exactly two entries falls back to the default for the affected row, and Herdr logs a warning.
 

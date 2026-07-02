@@ -291,9 +291,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Agent panel row templates. Exactly two entries: one per rendered line of each
 # agent entry. Fields: {icon} {space} {tab} {status} {agent} {custom}. A field
 # chunk with an empty value is dropped, including any literal prefix, so
-# "{ · tab}" adds nothing when a pane has no tab. Optional style role after a
-# colon: name, status, muted (e.g. "{agent:muted}"). Use {{ and }} for literal
-# braces.
+# "{ · tab}" adds nothing when a pane has no tab. Optional style after a colon:
+# a color with optional +bold/+dim/+italic/+underline modifiers. A color is a
+# theme palette token (text, overlay0, green, accent, ...) or a literal color
+# (hex, named, or rgb(...)), e.g. "{agent:overlay0}", "{agent:#f5c2e7}", or
+# "{space:text+bold}". The {icon} field always keeps its intrinsic state color.
+# Use {{ and }} for literal braces.
 # [ui.agent_panel]
 # rows = [
 #   " {icon} {space}{ · tab}",
