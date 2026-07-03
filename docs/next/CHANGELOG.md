@@ -9,6 +9,7 @@
 ### Fixed
 - `herdr config check` now reports unknown config keys with their full paths instead of treating ignored typos as valid configuration. (#1573)
 - `herdr wait agent-status` now returns `pane_not_found` promptly when its target pane closes instead of waiting for the full timeout. (#1439)
+- Plain PageUp/PageDown now reach primary-screen pager apps such as `less -X` and Git diff when they enter application cursor mode, while shell transcripts still use Herdr pane scrollback. (#953)
 
 ## [0.7.4] - 2026-07-15
 
