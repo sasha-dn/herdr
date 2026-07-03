@@ -21,6 +21,7 @@
 
 ### Fixed
 - Installed plugins now survive a live handoff (used by `herdr update` and manual handoffs) instead of the new server starting with zero plugins even though `plugins.json` is intact.
+- Unix local Herdr clients no longer treat empty bracketed paste as a clipboard-image bridge; `herdr --remote` keeps using it for local-desktop image paste over SSH. (#986)
 - Native Windows clients running inside Alacritty now preserve mouse reports and `ctrl+j` input instead of leaking mouse escape sequences into panes. `shift+enter` remains dependent on whether the outer terminal reports it as a distinct modified Enter key. (#792)
 - OMP integration state now recovers after resumed sessions such as `omp -c` and reports Ask/tool approval waits as blocked instead of leaving the pane working or stuck on the previous OMP session. (#879)
 - Remote attach now discovers compatible Homebrew, mise, and Nix profile installs before offering to install a sidecar binary to `~/.local/bin/herdr`. (#840)
