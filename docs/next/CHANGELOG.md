@@ -78,6 +78,7 @@
 - Double-clicking an agent in the sidebar now renames its tab (matching the Tabs section) instead of renaming the agent.
 - Clicking a space now returns to that workspace's latest active tab instead of a separately tracked home tab.
 - Bumped the client/server protocol version to 15 for socket API placement mutation event and response compatibility.
+- Bumped the client/server protocol version to 16 for foreground-client prefix input-source switching.
 
 ### Fixed
 - Installed plugins now survive a live handoff (used by `herdr update` and manual handoffs) instead of the new server starting with zero plugins even though `plugins.json` is intact.
