@@ -428,12 +428,7 @@ impl AppState {
                 NavigatorQueryKind::Text => navigator_matches(query, &row.search_text),
             });
             let pane_rows = self.navigator_pane_rows_for_tab(ws_idx, tab_idx, multi_tab);
-            let single_pane = pane_rows.len() <= 1;
             let filtered_panes = match query_kind {
-                // In the browse view a lone pane is already represented by its
-                // tab/workspace row, so its redundant pane row is hidden.
-                // Active searches and filters still reveal it so it stays findable.
-                NavigatorQueryKind::Empty if single_pane => Vec::new(),
                 NavigatorQueryKind::Empty => pane_rows,
                 NavigatorQueryKind::State(filter) => pane_rows
                     .into_iter()
@@ -3319,8 +3314,7 @@ mod tests {
     #[test]
     fn accepting_navigator_pane_switches_workspace_tab_and_focus() {
         let mut state = app_with_workspaces(&["one", "two"]);
-        let target = state.workspaces[1].test_split(Direction::Horizontal);
-        state.ensure_test_terminals();
+        let target = state.workspaces[1].tabs[0].root_pane;
         state.open_navigator();
         state
             .navigator
