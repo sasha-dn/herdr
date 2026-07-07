@@ -360,7 +360,7 @@ impl AppState {
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
         self.navigator.query.clear();
-        self.navigator.search_focused = false;
+        self.navigator.search_focused = true;
         self.navigator.state_filter = None;
         self.navigator.scroll = 0;
         self.navigator.expanded_workspaces.clear();
@@ -465,7 +465,12 @@ impl AppState {
             let show_tab_row =
                 multi_tab || (matches!(query_kind, NavigatorQueryKind::Text) && tab_matches);
             let mut pane_rows = self.navigator_pane_rows_for_tab(ws_idx, tab_idx, show_tab_row);
+            let single_pane = pane_rows.len() <= 1;
             let filtered_panes = match query_kind {
+                // In the browse view a lone pane is already represented by its
+                // tab/workspace row, so its redundant pane row is hidden.
+                // Active searches and filters still reveal it so it stays findable.
+                NavigatorQueryKind::Empty if single_pane => Vec::new(),
                 NavigatorQueryKind::Empty => pane_rows,
                 NavigatorQueryKind::State(filter) => pane_rows
                     .into_iter()
@@ -3851,7 +3856,8 @@ mod tests {
     #[test]
     fn accepting_navigator_pane_switches_workspace_tab_and_focus() {
         let mut state = app_with_workspaces(&["one", "two"]);
-        let target = state.workspaces[1].tabs[0].root_pane;
+        let target = state.workspaces[1].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
         state.open_navigator();
         state
             .navigator
