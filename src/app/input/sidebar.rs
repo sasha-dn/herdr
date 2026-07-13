@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::app::state::{AgentPanelSort, AppState, Mode, ViewLayout};
+use crate::app::state::{AgentPanelSort, AppState, LineSplitId, ManualEntryRef, Mode, ViewLayout};
 
 use super::ScrollbarClickTarget;
 
@@ -449,67 +449,132 @@ impl AppState {
             && row < rect.y + rect.height
     }
 
-    pub(super) fn agent_detail_target_at(
-        &self,
-        row: u16,
-    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+    /// Body rect and visible row areas for the agent panel, shared by the
+    /// pointer hit-testing helpers below. Returns `None` when the panel is
+    /// collapsed or has no usable body.
+    fn agent_panel_row_areas_at(&self) -> Option<(Rect, Vec<crate::ui::AgentPanelRowArea>)> {
         if self.sidebar_collapsed {
             return None;
         }
-
         let detail_area = self.agent_panel_rect();
         let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
         let body = crate::ui::agent_panel_body_rect(
             detail_area,
             crate::ui::should_show_scrollbar(metrics),
         );
-        if body.height < 2 || row < body.y || row >= body.y + body.height {
+        if body.width == 0 || body.height == 0 {
             return None;
         }
+        let rows = crate::ui::agent_panel_rows(self);
+        let areas = crate::ui::compute_agent_panel_row_areas(&rows, body, self.agent_panel_scroll);
+        Some((body, areas))
+    }
 
-        let mut row_y = body.y;
-        for detail in crate::ui::agent_panel_entries(self)
-            .into_iter()
-            .skip(self.agent_panel_scroll)
-        {
-            if row_y.saturating_add(1) >= body.y + body.height {
-                break;
-            }
-            if row == row_y || row == row_y + 1 {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y.saturating_add(2);
-            if row_y < body.y + body.height {
-                row_y = row_y.saturating_add(1);
+    pub(super) fn agent_detail_target_at(
+        &self,
+        row: u16,
+    ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        let (_, areas) = self.agent_panel_row_areas_at()?;
+        let rows = crate::ui::agent_panel_rows(self);
+        for area in &areas {
+            if row >= area.y && row < area.y + area.height {
+                // Left-click on a line-split row is a no-op (no pane focus).
+                if let crate::ui::AgentPanelRow::Agent(detail) = &rows[area.row_idx] {
+                    return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
+                }
+                return None;
             }
         }
         None
     }
 
-    /// Flat insert index into the manual agent order for a mouse row inside the
-    /// agent panel body. Each entry occupies two content rows plus one gap row.
-    /// Returns `None` outside the body or when not in manual mode.
-    pub(super) fn agent_panel_drop_index_at_row(&self, row: u16) -> Option<usize> {
-        if self.sidebar_collapsed || !matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
+    /// Manual-order entry (agent or line-split) under the given row, for drag
+    /// pickup. Returns `None` outside manual mode or outside any row.
+    pub(super) fn agent_panel_entry_ref_at_row(&self, row: u16) -> Option<ManualEntryRef> {
+        if !matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
             return None;
         }
+        let (_, areas) = self.agent_panel_row_areas_at()?;
+        let rows = crate::ui::agent_panel_rows(self);
+        for area in &areas {
+            if row >= area.y && row < area.y + area.height {
+                return Some(match &rows[area.row_idx] {
+                    crate::ui::AgentPanelRow::Agent(detail) => ManualEntryRef::Pane(detail.pane_id),
+                    crate::ui::AgentPanelRow::LineSplit { id, .. } => {
+                        ManualEntryRef::LineSplit(*id)
+                    }
+                });
+            }
+        }
+        None
+    }
 
+    /// Line-split id under the given row, if any (for right-click menu).
+    pub(super) fn agent_panel_line_split_at_row(&self, row: u16) -> Option<LineSplitId> {
+        if !matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
+            return None;
+        }
+        let (_, areas) = self.agent_panel_row_areas_at()?;
+        let rows = crate::ui::agent_panel_rows(self);
+        for area in &areas {
+            if row >= area.y && row < area.y + area.height {
+                if let crate::ui::AgentPanelRow::LineSplit { id, .. } = &rows[area.row_idx] {
+                    return Some(*id);
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    pub(super) fn on_agent_panel_split_button(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
         let detail_area = self.agent_panel_rect();
-        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
-        let body = crate::ui::agent_panel_body_rect(
-            detail_area,
-            crate::ui::should_show_scrollbar(metrics),
-        );
-        if body.height < 2 || row < body.y || row >= body.y + body.height {
+        let rect = crate::ui::agent_panel_split_button_rect(detail_area, self.agent_panel_sort);
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
+    }
+
+    /// Flat insert index into the manual agent order for a mouse row inside the
+    /// agent panel body, honoring variable row heights. The upper half of a
+    /// row's slot inserts before it, the lower half (including its trailing gap)
+    /// after it. Returns `None` outside the body or when not in manual mode.
+    pub(super) fn agent_panel_drop_index_at_row(&self, row: u16) -> Option<usize> {
+        if !matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
             return None;
         }
-
-        let num_entries = crate::ui::agent_panel_entries(self).len();
-        // Rows within an entry group of 3 (content, content, gap) round toward
-        // the nearest boundary: the two content rows insert before the entry,
-        // the gap row inserts after it.
-        let offset = row.saturating_sub(body.y);
-        let idx = self.agent_panel_scroll + ((offset + 1) / 3) as usize;
+        let (body, areas) = self.agent_panel_row_areas_at()?;
+        if row < body.y || row >= body.y + body.height {
+            return None;
+        }
+        let num_entries = crate::ui::agent_panel_rows(self).len();
+        for area in &areas {
+            let slot_bottom = area.y.saturating_add(area.height);
+            if row < slot_bottom {
+                // Upper half inserts before, lower half after.
+                let mid = area.y.saturating_add(area.height / 2);
+                let idx = if row < mid {
+                    area.row_idx
+                } else {
+                    area.row_idx.saturating_add(1)
+                };
+                return Some(idx.min(num_entries));
+            }
+            // Gap row directly below this slot inserts after it.
+            if row == slot_bottom {
+                return Some(area.row_idx.saturating_add(1).min(num_entries));
+            }
+        }
+        // Below the last visible row: insert at the end of what is visible.
+        let idx = areas
+            .last()
+            .map(|area| area.row_idx.saturating_add(1))
+            .unwrap_or(self.agent_panel_scroll);
         Some(idx.min(num_entries))
     }
 }

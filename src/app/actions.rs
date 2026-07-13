@@ -1263,20 +1263,26 @@ impl AppState {
         let current: std::collections::HashSet<crate::layout::PaneId> =
             flat.iter().map(|(pane_id, _)| *pane_id).collect();
 
-        // Drop stale entries and prune the known set.
+        // Drop stale pane entries and prune the known set. Line-splits are user
+        // data, never derived from panes, so they are always retained.
         self.agent_manual_order.order.retain(|entry| match entry {
             crate::app::state::ManualEntry::Pane(pane_id) => current.contains(pane_id),
+            crate::app::state::ManualEntry::LineSplit { .. } => true,
         });
         self.agent_manual_order
             .known
             .retain(|pane_id| current.contains(pane_id));
 
         if !self.agent_manual_order.seeded {
-            self.agent_manual_order.order = flat
-                .iter()
-                .map(|(pane_id, _)| crate::app::state::ManualEntry::Pane(*pane_id))
-                .collect();
-            self.agent_manual_order.known = current;
+            // First reconcile: establish the natural pane order. Append panes not
+            // yet present (line-splits, if any, keep their positions untouched).
+            for (pane_id, _) in &flat {
+                if self.agent_manual_order.known.insert(*pane_id) {
+                    self.agent_manual_order
+                        .order
+                        .push(crate::app::state::ManualEntry::Pane(*pane_id));
+                }
+            }
             self.agent_manual_order.seeded = true;
             return;
         }
@@ -1285,8 +1291,9 @@ impl AppState {
             if self.agent_manual_order.known.contains(pane_id) {
                 continue;
             }
-            // Genuinely new agent: insert above the topmost (earliest) entry
-            // belonging to the same workspace, else at the very top.
+            // Genuinely new agent: insert above the topmost (earliest) pane entry
+            // belonging to the same workspace, else at the very top. Line-splits
+            // are skipped when locating that pane.
             let insert_pos = self
                 .agent_manual_order
                 .order
@@ -1295,6 +1302,7 @@ impl AppState {
                     crate::app::state::ManualEntry::Pane(other) => {
                         pane_workspace.get(other) == Some(ws_idx)
                     }
+                    crate::app::state::ManualEntry::LineSplit { .. } => false,
                 })
                 .unwrap_or(0);
             self.agent_manual_order
@@ -1304,18 +1312,30 @@ impl AppState {
         }
     }
 
-    /// Move an agent pane to a new position in the flat manual order. The
-    /// `insert_idx` is a slot in the current order (before removal), clamped to
-    /// bounds. Cross-workspace moves are allowed. Client-only presentation
-    /// state, PTY-free. Returns true when the order changed.
-    pub fn move_agent(&mut self, source_pane_id: crate::layout::PaneId, insert_idx: usize) -> bool {
-        let Some(from) = self
-            .agent_manual_order
-            .order
-            .iter()
-            .position(|entry| match entry {
-                crate::app::state::ManualEntry::Pane(pane_id) => *pane_id == source_pane_id,
-            })
+    /// Move a manual-order entry (agent pane or line-split) to a new position in
+    /// the flat manual order. The `insert_idx` is a slot in the current order
+    /// (before removal), clamped to bounds. Cross-workspace moves are allowed.
+    /// Client-only presentation state, PTY-free. Returns true when the order
+    /// changed.
+    pub(crate) fn move_agent_entry(
+        &mut self,
+        source: crate::app::state::ManualEntryRef,
+        insert_idx: usize,
+    ) -> bool {
+        use crate::app::state::{ManualEntry, ManualEntryRef};
+        let Some(from) =
+            self.agent_manual_order
+                .order
+                .iter()
+                .position(|entry| match (entry, source) {
+                    (ManualEntry::Pane(pane_id), ManualEntryRef::Pane(source_pane_id)) => {
+                        *pane_id == source_pane_id
+                    }
+                    (ManualEntry::LineSplit { id, .. }, ManualEntryRef::LineSplit(source_id)) => {
+                        *id == source_id
+                    }
+                    _ => false,
+                })
         else {
             return false;
         };
@@ -1385,15 +1405,18 @@ impl AppState {
         };
         let ws_idx = target.ws_idx;
         let pane_id = target.pane_id;
+        // Scroll math tracks the full row list (agents + line-splits), so map the
+        // agent to its row index for ensure-visible.
+        let row_idx = crate::ui::agent_panel_row_index_of_pane(self, pane_id).unwrap_or(idx);
 
         if self.active == Some(ws_idx) && self.workspaces[ws_idx].focused_pane_id() == Some(pane_id)
         {
-            self.ensure_agent_panel_entry_visible(idx);
+            self.ensure_agent_panel_entry_visible(row_idx);
             return true;
         }
 
         if self.focus_pane_in_workspace(ws_idx, pane_id) {
-            self.ensure_agent_panel_entry_visible(idx);
+            self.ensure_agent_panel_entry_visible(row_idx);
             return true;
         }
         false
@@ -1420,6 +1443,14 @@ impl AppState {
         };
 
         self.focus_agent_entry(target_idx);
+    }
+
+    /// Ensure the agent-panel row for `pane_id` is scrolled into view, mapping the
+    /// pane to its row index in the full (agents + line-splits) row list.
+    pub(crate) fn ensure_agent_panel_pane_visible(&mut self, pane_id: crate::layout::PaneId) {
+        if let Some(row_idx) = crate::ui::agent_panel_row_index_of_pane(self, pane_id) {
+            self.ensure_agent_panel_entry_visible(row_idx);
+        }
     }
 
     pub(crate) fn ensure_agent_panel_entry_visible(&mut self, idx: usize) {
@@ -4082,8 +4113,9 @@ mod tests {
             .agent_manual_order
             .order
             .iter()
-            .map(|entry| match entry {
-                crate::app::state::ManualEntry::Pane(pane_id) => *pane_id,
+            .filter_map(|entry| match entry {
+                crate::app::state::ManualEntry::Pane(pane_id) => Some(*pane_id),
+                crate::app::state::ManualEntry::LineSplit { .. } => None,
             })
             .collect()
     }
@@ -4192,11 +4224,14 @@ mod tests {
         assert_eq!(manual_order_pane_ids(&state), vec![a, b, c]);
 
         // Move the ws1 pane C to the very top (cross-workspace).
-        assert!(state.move_agent(c, 0));
+        assert!(state.move_agent_entry(crate::app::state::ManualEntryRef::Pane(c), 0));
         assert_eq!(manual_order_pane_ids(&state), vec![c, a, b]);
 
         // Move A down to the end (within-list).
-        assert!(state.move_agent(a, state.agent_manual_order.order.len()));
+        assert!(state.move_agent_entry(
+            crate::app::state::ManualEntryRef::Pane(a),
+            state.agent_manual_order.order.len()
+        ));
         assert_eq!(manual_order_pane_ids(&state), vec![c, b, a]);
         state.assert_invariants_for_test();
     }
@@ -4206,7 +4241,7 @@ mod tests {
         let (mut state, a, b, c) = app_with_agents();
         state.reconcile_agent_manual_order();
 
-        assert!(state.move_agent(a, 999));
+        assert!(state.move_agent_entry(crate::app::state::ManualEntryRef::Pane(a), 999));
         assert_eq!(manual_order_pane_ids(&state), vec![b, c, a]);
         state.assert_invariants_for_test();
     }
@@ -4217,8 +4252,102 @@ mod tests {
         state.reconcile_agent_manual_order();
         let before = manual_order_pane_ids(&state);
 
-        assert!(!state.move_agent(crate::layout::PaneId::from_raw(9999), 0));
+        assert!(!state.move_agent_entry(
+            crate::app::state::ManualEntryRef::Pane(crate::layout::PaneId::from_raw(9999)),
+            0
+        ));
         assert_eq!(manual_order_pane_ids(&state), before);
+    }
+
+    #[test]
+    fn reconcile_leaves_line_splits_untouched_and_places_new_panes() {
+        use crate::app::state::{ManualEntry, ManualEntryRef};
+        let (mut state, a, b, c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        assert_eq!(manual_order_pane_ids(&state), vec![a, b, c]);
+
+        // Insert a line-split between a and b (flat index 1).
+        let split = state
+            .agent_manual_order
+            .new_line_split("scheduled".to_string(), 1);
+
+        // Closing a pane prunes it but keeps the line-split in place.
+        state.workspaces[0].close_pane(b);
+        state.reconcile_agent_manual_order();
+        let ids_and_splits: Vec<_> = state
+            .agent_manual_order
+            .order
+            .iter()
+            .map(|entry| match entry {
+                ManualEntry::Pane(pane_id) => format!("pane:{pane_id:?}"),
+                ManualEntry::LineSplit { id, name } => format!("split:{}:{name}", id.0),
+            })
+            .collect();
+        assert_eq!(
+            ids_and_splits,
+            vec![
+                format!("pane:{a:?}"),
+                format!("split:{}:scheduled", split.0),
+                format!("pane:{c:?}"),
+            ]
+        );
+        assert!(state
+            .agent_manual_order
+            .order
+            .iter()
+            .any(|entry| matches!(entry, ManualEntry::LineSplit { id, .. } if *id == split)));
+
+        // Moving the line-split still works via the entry-move path.
+        assert!(state.move_agent_entry(ManualEntryRef::LineSplit(split), 0));
+        assert!(matches!(
+            state.agent_manual_order.order.first(),
+            Some(ManualEntry::LineSplit { id, .. }) if *id == split
+        ));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_agent_entry_moves_line_split_and_clamps() {
+        use crate::app::state::{ManualEntry, ManualEntryRef};
+        let (mut state, _a, _b, _c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        let split = state.agent_manual_order.new_line_split("x".to_string(), 0);
+
+        // Clamp an out-of-range insert index to the end.
+        assert!(state.move_agent_entry(ManualEntryRef::LineSplit(split), 999));
+        assert!(matches!(
+            state.agent_manual_order.order.last(),
+            Some(ManualEntry::LineSplit { id, .. }) if *id == split
+        ));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn keyboard_cycle_skips_line_split_rows() {
+        let (mut state, a, b, c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        // Line-splits scattered through the order must never receive focus.
+        state
+            .agent_manual_order
+            .new_line_split("top".to_string(), 0);
+        state
+            .agent_manual_order
+            .new_line_split("mid".to_string(), 2);
+
+        state.workspaces[0].tabs[0].layout.focus_pane(a);
+        let mut focused = Vec::new();
+        for _ in 0..3 {
+            state.next_agent();
+            if let Some(pane) = state
+                .active
+                .and_then(|i| state.workspaces[i].focused_pane_id())
+            {
+                focused.push(pane);
+            }
+        }
+        // Cycling visits only agent panes, wrapping across all three.
+        assert!(focused.iter().all(|pane| [a, b, c].contains(pane)));
+        assert!(focused.contains(&b) && focused.contains(&c));
     }
 
     #[test]
@@ -4241,7 +4370,7 @@ mod tests {
     fn manual_order_snapshot_remaps_panes_by_public_key() {
         let (mut state, a, b, c) = app_with_agents();
         state.reconcile_agent_manual_order();
-        state.move_agent(c, 0);
+        state.move_agent_entry(crate::app::state::ManualEntryRef::Pane(c), 0);
         assert_eq!(manual_order_pane_ids(&state), vec![c, a, b]);
 
         let keys = state.agent_manual_order.to_public_keys(&state.workspaces);
@@ -4272,8 +4401,9 @@ mod tests {
         let rebuilt_ids: Vec<_> = rebuilt
             .order
             .iter()
-            .map(|entry| match entry {
-                crate::app::state::ManualEntry::Pane(pane_id) => *pane_id,
+            .filter_map(|entry| match entry {
+                crate::app::state::ManualEntry::Pane(pane_id) => Some(*pane_id),
+                crate::app::state::ManualEntry::LineSplit { .. } => None,
             })
             .collect();
         assert_eq!(rebuilt_ids, vec![remap[&c], remap[&a], remap[&b]]);

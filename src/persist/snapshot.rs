@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 4;
+pub(super) const SNAPSHOT_VERSION: u32 = 5;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -39,10 +39,20 @@ pub struct AgentManualOrderSnapshot {
     pub entries: Vec<AgentManualEntrySnapshot>,
 }
 
+/// A single persisted manual-order entry. Panes keep the stable
+/// (workspace id + public pane number) keying; line-splits carry their id and
+/// name. Untagged so pre-line-split snapshots (bare pane objects) still parse.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct AgentManualEntrySnapshot {
-    pub workspace_id: String,
-    pub pane_number: usize,
+#[serde(untagged)]
+pub enum AgentManualEntrySnapshot {
+    Pane {
+        workspace_id: String,
+        pane_number: usize,
+    },
+    LineSplit {
+        line_split_id: u64,
+        name: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -282,15 +292,26 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
-    agent_manual_order_keys: Vec<(String, usize)>,
+    agent_manual_order_keys: Vec<crate::app::state::ManualOrderEntryKey>,
 ) -> SessionSnapshot {
     let agent_manual_order =
         (!agent_manual_order_keys.is_empty()).then(|| AgentManualOrderSnapshot {
             entries: agent_manual_order_keys
                 .into_iter()
-                .map(|(workspace_id, pane_number)| AgentManualEntrySnapshot {
-                    workspace_id,
-                    pane_number,
+                .map(|key| match key {
+                    crate::app::state::ManualOrderEntryKey::Pane {
+                        workspace_id,
+                        pane_number,
+                    } => AgentManualEntrySnapshot::Pane {
+                        workspace_id,
+                        pane_number,
+                    },
+                    crate::app::state::ManualOrderEntryKey::LineSplit { id, name } => {
+                        AgentManualEntrySnapshot::LineSplit {
+                            line_split_id: id,
+                            name,
+                        }
+                    }
                 })
                 .collect(),
         });
@@ -632,27 +653,119 @@ mod tests {
         let keys = state.agent_manual_order.to_public_keys(&state.workspaces);
         assert_eq!(keys.len(), 2);
 
-        let snap = capture_from_state(&state);
-        let captured: Vec<(String, usize)> = snap
-            .agent_manual_order
-            .as_ref()
-            .expect("manual order captured")
-            .entries
+        let expected: Vec<(String, usize)> = keys
             .iter()
-            .map(|entry| (entry.workspace_id.clone(), entry.pane_number))
+            .map(|key| match key {
+                crate::app::state::ManualOrderEntryKey::Pane {
+                    workspace_id,
+                    pane_number,
+                } => (workspace_id.clone(), *pane_number),
+                crate::app::state::ManualOrderEntryKey::LineSplit { .. } => {
+                    panic!("unexpected line-split in pane-only fixture")
+                }
+            })
             .collect();
-        assert_eq!(captured, keys);
+
+        let pane_keys = |entries: &[AgentManualEntrySnapshot]| -> Vec<(String, usize)> {
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    AgentManualEntrySnapshot::Pane {
+                        workspace_id,
+                        pane_number,
+                    } => (workspace_id.clone(), *pane_number),
+                    AgentManualEntrySnapshot::LineSplit { .. } => {
+                        panic!("unexpected line-split in pane-only fixture")
+                    }
+                })
+                .collect()
+        };
+
+        let snap = capture_from_state(&state);
+        let captured = pane_keys(
+            &snap
+                .agent_manual_order
+                .as_ref()
+                .expect("manual order captured")
+                .entries,
+        );
+        assert_eq!(captured, expected);
 
         let json = serde_json::to_string(&snap).unwrap();
         let parsed = parse_snapshot(&json).unwrap();
-        let parsed_keys: Vec<(String, usize)> = parsed
+        let parsed_keys = pane_keys(
+            &parsed
+                .agent_manual_order
+                .expect("manual order parsed")
+                .entries,
+        );
+        assert_eq!(parsed_keys, expected);
+    }
+
+    #[test]
+    fn line_split_survives_capture_serialize_and_restore() {
+        use crate::app::state::{AgentManualOrder, ManualEntry};
+
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        for ws_idx in 0..state.workspaces.len() {
+            let pane = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(crate::detect::Agent::Pi);
+        }
+        state.reconcile_agent_manual_order();
+        // Line-split between the two agents.
+        let split_id = state
+            .agent_manual_order
+            .new_line_split("scheduled".to_string(), 1);
+
+        let snap = capture_from_state(&state);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
+        assert_eq!(SNAPSHOT_VERSION, 5);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+
+        // Rebuild the manual order as restore does, against the same workspaces.
+        let keys: Vec<crate::app::state::ManualOrderEntryKey> = parsed
             .agent_manual_order
             .expect("manual order parsed")
             .entries
             .iter()
-            .map(|entry| (entry.workspace_id.clone(), entry.pane_number))
+            .map(|entry| match entry {
+                AgentManualEntrySnapshot::Pane {
+                    workspace_id,
+                    pane_number,
+                } => crate::app::state::ManualOrderEntryKey::Pane {
+                    workspace_id: workspace_id.clone(),
+                    pane_number: *pane_number,
+                },
+                AgentManualEntrySnapshot::LineSplit {
+                    line_split_id,
+                    name,
+                } => crate::app::state::ManualOrderEntryKey::LineSplit {
+                    id: *line_split_id,
+                    name: name.clone(),
+                },
+            })
             .collect();
-        assert_eq!(parsed_keys, keys);
+        let rebuilt = AgentManualOrder::from_public_keys(&keys, &state.workspaces);
+
+        // Position preserved: line-split is the middle entry with its id/name.
+        assert!(matches!(
+            &rebuilt.order[1],
+            ManualEntry::LineSplit { id, name } if *id == split_id && name == "scheduled"
+        ));
+        assert!(matches!(rebuilt.order[0], ManualEntry::Pane(_)));
+        assert!(matches!(rebuilt.order[2], ManualEntry::Pane(_)));
+        // Next id sits above the restored maximum.
+        assert!(rebuilt.next_line_split_id > split_id.0);
     }
 
     #[test]
