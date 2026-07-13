@@ -351,6 +351,28 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.mode = Mode::RenamePane;
 }
 
+pub(super) fn open_rename_agent(
+    state: &mut AppState,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+) {
+    let Some(ws) = state.workspaces.get(ws_idx) else {
+        return;
+    };
+    let Some(pane) = ws.pane_state(pane_id) else {
+        return;
+    };
+    let terminal = state.terminals.get(&pane.attached_terminal_id);
+    state.creating_new_tab = false;
+    state.requested_new_tab_name = None;
+    state.rename_pane_target = Some(pane_id);
+    state.name_input = terminal
+        .and_then(|t| t.agent_name.clone())
+        .unwrap_or_default();
+    state.name_input_replace_on_type = terminal.and_then(|t| t.agent_name.as_ref()).is_none();
+    state.mode = Mode::RenameAgent;
+}
+
 fn next_new_tab_default_name(state: &AppState) -> String {
     state
         .active
@@ -488,6 +510,25 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                                 let terminal_id = pane.attached_terminal_id.clone();
                                 if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
                                     terminal.set_manual_label(new_name);
+                                    state.mark_session_dirty();
+                                }
+                            }
+                        }
+                    }
+                }
+                Mode::RenameAgent => {
+                    if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
+                    {
+                        if let Some(ws) = state.workspaces.get(ws_idx) {
+                            if let Some(pane) = ws.pane_state(pane_id) {
+                                let terminal_id = pane.attached_terminal_id.clone();
+                                if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
+                                    if new_name.is_empty() {
+                                        terminal.clear_agent_name();
+                                    } else {
+                                        terminal.set_agent_name(new_name.clone());
+                                        terminal.set_manual_label(new_name);
+                                    }
                                     state.mark_session_dirty();
                                 }
                             }
@@ -995,6 +1036,25 @@ impl App {
                                     pane_id,
                                     label: Some(new_name),
                                 },
+                            ),
+                        );
+                    }
+                }
+            }
+            Mode::RenameAgent => {
+                if let (Some(ws_idx), Some(pane_id)) =
+                    (self.state.active, self.state.rename_pane_target)
+                {
+                    if let Some(target) = self.public_pane_id(ws_idx, pane_id) {
+                        let name = if new_name.is_empty() {
+                            None
+                        } else {
+                            Some(new_name)
+                        };
+                        self.dispatch_tui_api_request(
+                            "tui.agent.rename",
+                            crate::api::schema::Method::AgentRename(
+                                crate::api::schema::AgentRenameParams { target, name },
                             ),
                         );
                     }

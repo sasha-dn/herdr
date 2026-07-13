@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::app::PaneClickState;
+use crate::app::{AgentRowClickState, PaneClickState};
 use crate::input::TerminalKey;
 use ratatui::layout::Direction;
 
@@ -85,7 +85,7 @@ impl App {
                 Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                 Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
-                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameAgent => {
                     self.handle_rename_key_via_api(key_event)
                 }
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
@@ -125,7 +125,7 @@ impl App {
 
     pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
         match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameAgent => {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }
@@ -244,6 +244,10 @@ impl App {
                 self.state.drag = None;
                 return;
             }
+        }
+
+        if self.handle_agent_row_double_click(mouse) {
+            return;
         }
 
         if self.handle_modified_url_click(mouse) {
@@ -393,6 +397,56 @@ impl App {
         true
     }
 
+    /// Detects a double-click on an agent row in the expanded agent panel or the
+    /// collapsed sidebar detail strip and opens the shared rename modal targeting
+    /// that agent. The first click is recorded and left to normal single-click
+    /// focus handling; only the qualifying second click is consumed here.
+    fn handle_agent_row_double_click(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        if !mouse.modifiers.is_empty() {
+            self.last_agent_row_click = None;
+            return false;
+        }
+
+        let sidebar = self.state.view.sidebar_rect;
+        let in_sidebar = mouse.column >= sidebar.x
+            && mouse.column < sidebar.x + sidebar.width
+            && mouse.row >= sidebar.y
+            && mouse.row < sidebar.y + sidebar.height;
+        if !in_sidebar {
+            self.last_agent_row_click = None;
+            return false;
+        }
+
+        let Some((ws_idx, _tab_idx, pane_id)) = self
+            .state
+            .agent_detail_target_at(mouse.row)
+            .or_else(|| self.state.collapsed_agent_detail_target_at(mouse.row))
+        else {
+            self.last_agent_row_click = None;
+            return false;
+        };
+
+        let click = AgentRowClickState {
+            pane_id,
+            at: std::time::Instant::now(),
+        };
+        if self
+            .last_agent_row_click
+            .is_some_and(|last| last.is_double_click_for(click))
+        {
+            self.last_agent_row_click = None;
+            self.focus_pane_internal_via_api(ws_idx, pane_id);
+            modal::open_rename_agent(&mut self.state, ws_idx, pane_id);
+            return true;
+        }
+
+        self.last_agent_row_click = Some(click);
+        false
+    }
+
     fn handle_pane_double_click(&mut self, mouse: MouseEvent) -> bool {
         // A pane press stops being a double-click candidate once it becomes
         // a drag or completes as a real text selection.
@@ -505,9 +559,11 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
 
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     match state.mode {
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
-            true
-        }
+        Mode::RenameWorkspace
+        | Mode::RenameTab
+        | Mode::RenamePane
+        | Mode::RenameAgent
+        | Mode::NewLinkedWorktree => true,
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()

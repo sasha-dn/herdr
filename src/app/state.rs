@@ -756,6 +756,7 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
+    RenameAgent,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,

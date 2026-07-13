@@ -386,7 +386,7 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameAgent
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -3561,5 +3561,192 @@ mod tests {
         };
 
         assert_eq!(wheel_routing(input_state), WheelRouting::HostScroll);
+    }
+
+    fn app_with_single_agent() -> (crate::app::App, crate::layout::PaneId) {
+        let mut app = app_for_mouse_test();
+        let ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = Some(Agent::Pi);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        (app, pane)
+    }
+
+    fn agent_terminal_id(
+        app: &crate::app::App,
+        ws_idx: usize,
+        pane: crate::layout::PaneId,
+    ) -> crate::terminal::TerminalId {
+        app.state.workspaces[ws_idx]
+            .pane_state(pane)
+            .unwrap()
+            .attached_terminal_id
+            .clone()
+    }
+
+    #[test]
+    fn double_click_agent_row_opens_rename_agent_expanded() {
+        let (mut app, pane) = app_with_single_agent();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+        let sidebar = app.state.view.sidebar_rect;
+        let row = (sidebar.y..sidebar.y + sidebar.height)
+            .find(|&r| app.state.agent_detail_target_at(r).map(|(_, _, p)| p) == Some(pane))
+            .expect("agent row visible in expanded panel");
+        let col = sidebar.x + 1;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.last_agent_row_click.is_some());
+        assert_eq!(app.state.rename_pane_target, None);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        assert_eq!(app.state.mode, Mode::RenameAgent);
+        assert_eq!(app.state.rename_pane_target, Some(pane));
+        assert!(app.last_agent_row_click.is_none());
+    }
+
+    #[test]
+    fn double_click_agent_row_opens_rename_agent_collapsed() {
+        let (mut app, pane) = app_with_single_agent();
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
+        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+
+        let (_, _, detail_area) =
+            crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        let row = (detail_area.y..detail_area.y + detail_area.height)
+            .find(|&r| {
+                app.state
+                    .collapsed_agent_detail_target_at(r)
+                    .map(|(_, _, p)| p)
+                    == Some(pane)
+            })
+            .expect("agent row visible in collapsed detail");
+        let col = detail_area.x;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        assert_eq!(app.state.mode, Mode::Terminal);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
+        assert_eq!(app.state.mode, Mode::RenameAgent);
+        assert_eq!(app.state.rename_pane_target, Some(pane));
+    }
+
+    #[test]
+    fn single_click_agent_row_focuses_without_rename() {
+        let (mut app, pane) = app_with_single_agent();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+        let sidebar = app.state.view.sidebar_rect;
+        let row = (sidebar.y..sidebar.y + sidebar.height)
+            .find(|&r| app.state.agent_detail_target_at(r).map(|(_, _, p)| p) == Some(pane))
+            .expect("agent row visible in expanded panel");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar.x + 1,
+            row,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.last_agent_row_click.is_some());
+        assert_eq!(app.state.rename_pane_target, None);
+    }
+
+    #[test]
+    fn saving_agent_rename_updates_agent_name_via_api() {
+        let (mut app, pane) = app_with_single_agent();
+        let terminal_id = agent_terminal_id(&app, 0, pane);
+
+        crate::app::input::modal::open_rename_agent(&mut app.state, 0, pane);
+        assert_eq!(app.state.mode, Mode::RenameAgent);
+        app.state.name_input = "renamed".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("renamed")
+        );
+        assert_eq!(app.state.rename_pane_target, None);
+    }
+
+    #[test]
+    fn esc_cancels_agent_rename_without_changing_name() {
+        let (mut app, pane) = app_with_single_agent();
+        let terminal_id = agent_terminal_id(&app, 0, pane);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_name("original".into());
+
+        crate::app::input::modal::open_rename_agent(&mut app.state, 0, pane);
+        app.state.name_input = "changed".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_name.as_deref(),
+            Some("original")
+        );
+    }
+
+    #[test]
+    fn duplicate_agent_rename_rejected_via_api() {
+        let (mut app, first_pane) = app_with_single_agent();
+        let second_pane = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let first_terminal_id = agent_terminal_id(&app, 0, first_pane);
+        let second_terminal_id = agent_terminal_id(&app, 0, second_pane);
+        app.state
+            .terminals
+            .get_mut(&first_terminal_id)
+            .unwrap()
+            .set_agent_name("alpha".into());
+        let second_terminal = app.state.terminals.get_mut(&second_terminal_id).unwrap();
+        second_terminal.detected_agent = Some(Agent::Pi);
+        second_terminal.set_agent_name("beta".into());
+
+        crate::app::input::modal::open_rename_agent(&mut app.state, 0, second_pane);
+        app.state.name_input = "alpha".into();
+
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        // Server-side validation rejects the duplicate, leaving the name unchanged.
+        assert_eq!(
+            app.state.terminals[&second_terminal_id]
+                .agent_name
+                .as_deref(),
+            Some("beta")
+        );
+    }
+
+    #[test]
+    fn renamed_agent_name_is_captured_in_snapshot() {
+        let (mut app, pane) = app_with_single_agent();
+
+        crate::app::input::modal::open_rename_agent(&mut app.state, 0, pane);
+        app.state.name_input = "captured".into();
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        let snapshot = capture_snapshot(&app.state);
+        let captured_name = snapshot.workspaces[0].tabs[0]
+            .panes
+            .get(&pane.raw())
+            .and_then(|pane| pane.agent_name.clone());
+        assert_eq!(captured_name.as_deref(), Some("captured"));
     }
 }
