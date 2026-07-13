@@ -899,6 +899,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            palette: [None; 256],
         };
         let _ = terminal_id;
         app
