@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::app::state::{AppState, Mode, ViewLayout};
+use crate::app::state::{AgentPanelSort, AppState, Mode, ViewLayout};
 
 use super::ScrollbarClickTarget;
 
@@ -485,6 +485,33 @@ impl AppState {
         }
         None
     }
+
+    /// Flat insert index into the manual agent order for a mouse row inside the
+    /// agent panel body. Each entry occupies two content rows plus one gap row.
+    /// Returns `None` outside the body or when not in manual mode.
+    pub(super) fn agent_panel_drop_index_at_row(&self, row: u16) -> Option<usize> {
+        if self.sidebar_collapsed || !matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
+            return None;
+        }
+
+        let detail_area = self.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(self, detail_area);
+        let body = crate::ui::agent_panel_body_rect(
+            detail_area,
+            crate::ui::should_show_scrollbar(metrics),
+        );
+        if body.height < 2 || row < body.y || row >= body.y + body.height {
+            return None;
+        }
+
+        let num_entries = crate::ui::agent_panel_entries(self).len();
+        // Rows within an entry group of 3 (content, content, gap) round toward
+        // the nearest boundary: the two content rows insert before the entry,
+        // the gap row inserts after it.
+        let offset = row.saturating_sub(body.y);
+        let idx = self.agent_panel_scroll + ((offset + 1) / 3) as usize;
+        Some(idx.min(num_entries))
+    }
 }
 
 #[cfg(test)]
@@ -497,6 +524,7 @@ mod tests {
     use super::super::{app_for_mouse_test, capture_snapshot, mouse, unique_temp_path};
     use crate::{
         app::state::{AgentPanelSort, DragTarget, Mode},
+        app::App,
         config::SidebarCollapsedModeConfig,
         detect::Agent,
         workspace::Workspace,
@@ -1572,5 +1600,156 @@ mod tests {
         assert!(app.state.drag.is_none());
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(26));
+    }
+
+    fn app_with_two_agents() -> App {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.agent_panel_sort = AgentPanelSort::Manual;
+        for ws_idx in 0..2 {
+            let pane = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(Agent::Pi);
+        }
+        app
+    }
+
+    fn manual_order_pane_ids(app: &App) -> Vec<crate::layout::PaneId> {
+        crate::ui::agent_panel_entries(&app.state)
+            .into_iter()
+            .map(|entry| entry.pane_id)
+            .collect()
+    }
+
+    fn agent_row_for(app: &App, pane_id: crate::layout::PaneId, want_last: bool) -> u16 {
+        let sidebar = app.state.view.sidebar_rect;
+        let rows = sidebar.y..sidebar.y + sidebar.height;
+        let matching = rows.filter(|&r| {
+            app.state.agent_detail_target_at(r).map(|(_, _, pane)| pane) == Some(pane_id)
+        });
+        if want_last {
+            matching.max().expect("agent row present")
+        } else {
+            matching.min().expect("agent row present")
+        }
+    }
+
+    #[test]
+    fn dragging_agent_reorders_manual_order() {
+        let mut app = app_with_two_agents();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let order = manual_order_pane_ids(&app);
+        assert_eq!(order.len(), 2);
+        let source_pane = order[0];
+        let last_pane = order[1];
+
+        let source_row = agent_row_for(&app, source_pane, false);
+        // The gap row just below the last entry inserts at the end of the order.
+        let target_row = agent_row_for(&app, last_pane, true) + 1;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            2,
+            source_row,
+        ));
+        assert!(app.state.agent_press.is_some());
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            2,
+            target_row,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::AgentReorder {
+                insert_idx: Some(2),
+                ..
+            })
+        ));
+
+        // A drag-to-reorder gesture must invalidate the pending double-click
+        // candidate so a fast re-click after the drag focuses rather than
+        // opening the rename dialog.
+        assert!(app.last_agent_row_click.is_none());
+
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
+
+        assert_eq!(manual_order_pane_ids(&app), vec![last_pane, source_pane]);
+        assert_ne!(app.state.mode, Mode::RenameAgent);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn double_clicking_agent_row_opens_rename_in_manual_mode() {
+        let mut app = app_with_two_agents();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let order = manual_order_pane_ids(&app);
+        let target_pane = order[0];
+        let row = agent_row_for(&app, target_pane, false);
+
+        // First click focuses; second quick click on the same row opens rename.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, row));
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, row));
+
+        assert_eq!(app.state.mode, Mode::RenameAgent);
+        assert!(app.state.agent_press.is_none());
+    }
+
+    #[test]
+    fn clicking_agent_row_without_drag_focuses_pane() {
+        let mut app = app_with_two_agents();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let order = manual_order_pane_ids(&app);
+        let target_pane = order[1];
+        let row = agent_row_for(&app, target_pane, false);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, row));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
+        assert!(app.state.agent_press.is_none());
+    }
+
+    #[test]
+    fn clicking_sort_toggle_cycles_spaces_priority_manual() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_panel_sort = AgentPanelSort::Spaces;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+
+        let click_toggle = |app: &mut App| {
+            let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+                app.state.view.sidebar_rect,
+                app.state.sidebar_section_split,
+            );
+            let rect = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x,
+                rect.y,
+            ));
+        };
+
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Priority);
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Manual);
+        click_toggle(&mut app);
+        assert_eq!(app.state.agent_panel_sort, AgentPanelSort::Spaces);
     }
 }

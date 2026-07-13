@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 3;
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -26,6 +26,23 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Flat manual agent ordering (TUI presentation state). Serialized by stable
+    /// keys so it survives the PaneId remap on restore. Optional for back-compat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_manual_order: Option<AgentManualOrderSnapshot>,
+}
+
+/// Persisted flat manual agent ordering. Entries reference panes by stable keys
+/// (workspace id + public pane number) rather than the volatile `PaneId`.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AgentManualOrderSnapshot {
+    pub entries: Vec<AgentManualEntrySnapshot>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AgentManualEntrySnapshot {
+    pub workspace_id: String,
+    pub pane_number: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,6 +202,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    agent_manual_order: Option<AgentManualOrderSnapshot>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -200,6 +219,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        agent_manual_order: raw.agent_manual_order,
     })
 }
 
@@ -262,7 +282,18 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    agent_manual_order_keys: Vec<(String, usize)>,
 ) -> SessionSnapshot {
+    let agent_manual_order =
+        (!agent_manual_order_keys.is_empty()).then(|| AgentManualOrderSnapshot {
+            entries: agent_manual_order_keys
+                .into_iter()
+                .map(|(workspace_id, pane_number)| AgentManualEntrySnapshot {
+                    workspace_id,
+                    pane_number,
+                })
+                .collect(),
+        });
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
@@ -274,6 +305,7 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        agent_manual_order,
     }
 }
 
@@ -543,6 +575,7 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            state.agent_manual_order.to_public_keys(&state.workspaces),
         )
     }
 
@@ -570,6 +603,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            agent_manual_order: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -577,6 +611,48 @@ mod tests {
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
         assert_eq!(restored.sidebar_section_split, Some(0.5));
+    }
+
+    #[test]
+    fn agent_manual_order_survives_capture_and_parse() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        for ws_idx in 0..state.workspaces.len() {
+            let pane = state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = state.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .detected_agent = Some(crate::detect::Agent::Pi);
+        }
+        state.reconcile_agent_manual_order();
+        let keys = state.agent_manual_order.to_public_keys(&state.workspaces);
+        assert_eq!(keys.len(), 2);
+
+        let snap = capture_from_state(&state);
+        let captured: Vec<(String, usize)> = snap
+            .agent_manual_order
+            .as_ref()
+            .expect("manual order captured")
+            .entries
+            .iter()
+            .map(|entry| (entry.workspace_id.clone(), entry.pane_number))
+            .collect();
+        assert_eq!(captured, keys);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+        let parsed_keys: Vec<(String, usize)> = parsed
+            .agent_manual_order
+            .expect("manual order parsed")
+            .entries
+            .iter()
+            .map(|entry| (entry.workspace_id.clone(), entry.pane_number))
+            .collect();
+        assert_eq!(parsed_keys, keys);
     }
 
     #[test]
@@ -656,6 +732,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            agent_manual_order: None,
             version: SNAPSHOT_VERSION,
         };
 
@@ -1221,6 +1298,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            agent_manual_order: None,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

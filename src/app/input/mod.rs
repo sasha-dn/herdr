@@ -22,6 +22,7 @@ enum WheelRouting {
 
 const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
 const TAB_DRAG_THRESHOLD: u16 = 1;
+const AGENT_DRAG_THRESHOLD: u16 = 1;
 
 fn modified_url_click_modifier() -> KeyModifiers {
     KeyModifiers::CONTROL
@@ -321,6 +322,15 @@ impl App {
                         source_tab_idx,
                         insert_idx,
                     } => self.move_tab_via_api(ws_idx, source_tab_idx, insert_idx),
+                    MouseAction::MoveAgent {
+                        source_pane_id,
+                        insert_idx,
+                    } => {
+                        // Manual agent order is client-only presentation state, so
+                        // mutate it directly instead of routing through the runtime
+                        // API path used by workspace/tab moves.
+                        self.state.move_agent(source_pane_id, insert_idx);
+                    }
                     MouseAction::SetSplitRatio { path, ratio } => {
                         self.set_split_ratio_via_api(path, ratio)
                     }
@@ -402,6 +412,13 @@ impl App {
     /// that agent. The first click is recorded and left to normal single-click
     /// focus handling; only the qualifying second click is consumed here.
     fn handle_agent_row_double_click(&mut self, mouse: MouseEvent) -> bool {
+        // A left drag starts a drag-to-reorder gesture; invalidate any pending
+        // agent-row click so a drag (and the click that may follow it) is never
+        // mistaken for the first half of a double-click that would open rename.
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
+            self.last_agent_row_click = None;
+            return false;
+        }
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return false;
         }
@@ -698,6 +715,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_width,
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
+        state.agent_manual_order.to_public_keys(&state.workspaces),
     )
 }
 

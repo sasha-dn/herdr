@@ -75,6 +75,7 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
         AgentPanelSort::Spaces => "grouped",
         AgentPanelSort::Priority => "priority",
+        AgentPanelSort::Manual => "manual",
     }
 }
 
@@ -141,13 +142,33 @@ fn agent_panel_entries_with_runtimes(
         })
         .collect();
 
-    if matches!(app.agent_panel_sort, AgentPanelSort::Priority) {
-        entries.sort_by_key(|entry| {
-            (
-                std::cmp::Reverse(workspace_attention_priority(entry.state, entry.seen)),
-                std::cmp::Reverse(entry.last_agent_state_change_seq),
-            )
-        });
+    match app.agent_panel_sort {
+        AgentPanelSort::Spaces => {}
+        AgentPanelSort::Priority => {
+            entries.sort_by_key(|entry| {
+                (
+                    std::cmp::Reverse(workspace_attention_priority(entry.state, entry.seen)),
+                    std::cmp::Reverse(entry.last_agent_state_change_seq),
+                )
+            });
+        }
+        AgentPanelSort::Manual => {
+            // Reorder the flat list to follow the manual order. Entries present
+            // in `order` sort by their position; any not-yet-reconciled entries
+            // keep their natural relative order and land at the end (defensive
+            // fallback - reconcile normally keeps `order` in sync before render).
+            let order_pos: std::collections::HashMap<crate::layout::PaneId, usize> = app
+                .agent_manual_order
+                .order
+                .iter()
+                .enumerate()
+                .map(|(idx, entry)| match entry {
+                    crate::app::state::ManualEntry::Pane(pane_id) => (*pane_id, idx),
+                })
+                .collect();
+            entries
+                .sort_by_key(|entry| order_pos.get(&entry.pane_id).copied().unwrap_or(usize::MAX));
+        }
     }
 
     entries
@@ -758,6 +779,28 @@ pub(crate) fn workspace_drop_indicator_row(
     None
 }
 
+/// Screen row for the manual-agent drop indicator at flat `insert_idx`.
+/// Entries are laid out as two content rows plus one gap row; the indicator
+/// sits at the top of the target slot (the gap row above the entry, or the
+/// panel top for the first slot).
+pub(crate) fn agent_panel_drop_indicator_row(
+    body: Rect,
+    scroll: usize,
+    insert_idx: usize,
+) -> Option<u16> {
+    if body.height == 0 || insert_idx < scroll {
+        return None;
+    }
+    let j = insert_idx - scroll;
+    let row = if j == 0 {
+        body.y
+    } else {
+        body.y
+            .saturating_add((3u16.saturating_mul(j as u16)).saturating_sub(1))
+    };
+    (row < body.y + body.height).then_some(row)
+}
+
 pub(super) fn render_sidebar(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1088,6 +1131,25 @@ fn render_agent_detail(
         }
     }
 
+    if let Some(insert_idx) = match app.drag.as_ref().map(|drag| &drag.target) {
+        Some(crate::app::state::DragTarget::AgentReorder {
+            insert_idx: Some(insert_idx),
+            ..
+        }) => Some(*insert_idx),
+        _ => None,
+    } {
+        if let Some(y) = agent_panel_drop_indicator_row(body, app.agent_panel_scroll, insert_idx) {
+            let indicator_right = scrollbar_rect
+                .map(|rect| rect.x)
+                .unwrap_or(body.x + body.width);
+            let buf = frame.buffer_mut();
+            for x in body.x..indicator_right {
+                buf[(x, y)].set_symbol("─");
+                buf[(x, y)].set_style(Style::default().fg(p.accent));
+            }
+        }
+    }
+
     if let Some(track) = scrollbar_rect {
         render_scrollbar(frame, metrics, track, p.surface_dim, p.overlay0, "▕");
     }
@@ -1250,6 +1312,38 @@ mod tests {
             .collect();
 
         assert_eq!(labels, ["four", "two", "one", "three"]);
+    }
+
+    #[test]
+    fn manual_agent_panel_sort_follows_manual_order() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("one"),
+            Workspace::test_new("two"),
+            Workspace::test_new("three"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        for ws_idx in 0..app.workspaces.len() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+
+        // Seed the natural order, then reverse it via a manual move.
+        app.reconcile_agent_manual_order();
+        let last = agent_panel_entries(&app)[2].pane_id;
+        app.move_agent(last, 0);
+
+        let labels: Vec<String> = agent_panel_entries(&app)
+            .into_iter()
+            .map(|entry| entry.primary_label)
+            .collect();
+        assert_eq!(labels, ["three", "one", "two"]);
     }
 
     #[cfg(unix)]

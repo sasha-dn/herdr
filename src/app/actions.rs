@@ -1241,6 +1241,101 @@ impl AppState {
         true
     }
 
+    /// Reconcile the flat manual agent order against the current set of agent
+    /// panes. Called from the compute_view mutation phase so render stays pure.
+    ///
+    /// Drops stale entries, seeds the natural display order on first run, then
+    /// places genuinely new agents: above the topmost existing pane of the same
+    /// workspace, or at the very top when that workspace has no pane in the
+    /// order yet.
+    pub(crate) fn reconcile_agent_manual_order(&mut self) {
+        // Flat agent-pane set in natural display order (workspaces x panes),
+        // matching the flatten used by the ordering function.
+        let mut flat: Vec<(crate::layout::PaneId, usize)> = Vec::new();
+        let mut pane_workspace: std::collections::HashMap<crate::layout::PaneId, usize> =
+            std::collections::HashMap::new();
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            for detail in ws.pane_details(&self.terminals) {
+                flat.push((detail.pane_id, ws_idx));
+                pane_workspace.insert(detail.pane_id, ws_idx);
+            }
+        }
+        let current: std::collections::HashSet<crate::layout::PaneId> =
+            flat.iter().map(|(pane_id, _)| *pane_id).collect();
+
+        // Drop stale entries and prune the known set.
+        self.agent_manual_order.order.retain(|entry| match entry {
+            crate::app::state::ManualEntry::Pane(pane_id) => current.contains(pane_id),
+        });
+        self.agent_manual_order
+            .known
+            .retain(|pane_id| current.contains(pane_id));
+
+        if !self.agent_manual_order.seeded {
+            self.agent_manual_order.order = flat
+                .iter()
+                .map(|(pane_id, _)| crate::app::state::ManualEntry::Pane(*pane_id))
+                .collect();
+            self.agent_manual_order.known = current;
+            self.agent_manual_order.seeded = true;
+            return;
+        }
+
+        for (pane_id, ws_idx) in &flat {
+            if self.agent_manual_order.known.contains(pane_id) {
+                continue;
+            }
+            // Genuinely new agent: insert above the topmost (earliest) entry
+            // belonging to the same workspace, else at the very top.
+            let insert_pos = self
+                .agent_manual_order
+                .order
+                .iter()
+                .position(|entry| match entry {
+                    crate::app::state::ManualEntry::Pane(other) => {
+                        pane_workspace.get(other) == Some(ws_idx)
+                    }
+                })
+                .unwrap_or(0);
+            self.agent_manual_order
+                .order
+                .insert(insert_pos, crate::app::state::ManualEntry::Pane(*pane_id));
+            self.agent_manual_order.known.insert(*pane_id);
+        }
+    }
+
+    /// Move an agent pane to a new position in the flat manual order. The
+    /// `insert_idx` is a slot in the current order (before removal), clamped to
+    /// bounds. Cross-workspace moves are allowed. Client-only presentation
+    /// state, PTY-free. Returns true when the order changed.
+    pub fn move_agent(&mut self, source_pane_id: crate::layout::PaneId, insert_idx: usize) -> bool {
+        let Some(from) = self
+            .agent_manual_order
+            .order
+            .iter()
+            .position(|entry| match entry {
+                crate::app::state::ManualEntry::Pane(pane_id) => *pane_id == source_pane_id,
+            })
+        else {
+            return false;
+        };
+
+        let insert_idx = insert_idx.min(self.agent_manual_order.order.len());
+        let target_idx = if from < insert_idx {
+            insert_idx - 1
+        } else {
+            insert_idx
+        };
+        if from == target_idx {
+            return false;
+        }
+
+        self.mark_session_dirty();
+        let entry = self.agent_manual_order.order.remove(from);
+        self.agent_manual_order.order.insert(target_idx, entry);
+        true
+    }
+
     pub fn scroll_tabs_left(&mut self) {
         self.tab_scroll_follow_active = false;
         self.tab_scroll = self.tab_scroll.saturating_sub(1);
@@ -3980,6 +4075,220 @@ mod tests {
             .map(|ws| ws.display_name())
             .collect();
         assert_eq!(names, vec!["b", "c", "a"]);
+    }
+
+    fn manual_order_pane_ids(state: &AppState) -> Vec<crate::layout::PaneId> {
+        state
+            .agent_manual_order
+            .order
+            .iter()
+            .map(|entry| match entry {
+                crate::app::state::ManualEntry::Pane(pane_id) => *pane_id,
+            })
+            .collect()
+    }
+
+    /// Two workspaces (ws0 has two agent panes, ws1 has one) with all panes
+    /// marked as agents. Returns (state, [a, b, c]).
+    fn app_with_agents() -> (
+        AppState,
+        crate::layout::PaneId,
+        crate::layout::PaneId,
+        crate::layout::PaneId,
+    ) {
+        let mut first = Workspace::test_new("one");
+        let a = first.tabs[0].root_pane;
+        let b = first.test_split(Direction::Horizontal);
+        first.tabs[0].layout.focus_pane(a);
+        let second = Workspace::test_new("two");
+        let c = second.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![first, second];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        mark_agent(&mut state, 0, 0, a);
+        mark_agent(&mut state, 0, 0, b);
+        mark_agent(&mut state, 1, 0, c);
+        (state, a, b, c)
+    }
+
+    #[test]
+    fn manual_order_seeds_natural_display_order() {
+        let (mut state, a, b, c) = app_with_agents();
+
+        state.reconcile_agent_manual_order();
+
+        assert!(state.agent_manual_order.seeded);
+        assert_eq!(manual_order_pane_ids(&state), vec![a, b, c]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn manual_order_new_same_workspace_agent_lands_above_topmost() {
+        // Seed with ws0 pane A and ws1 pane C only.
+        let first = Workspace::test_new("one");
+        let a = first.tabs[0].root_pane;
+        let second = Workspace::test_new("two");
+        let c = second.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![first, second];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        mark_agent(&mut state, 0, 0, a);
+        mark_agent(&mut state, 1, 0, c);
+        state.reconcile_agent_manual_order();
+        assert_eq!(manual_order_pane_ids(&state), vec![a, c]);
+
+        // Add a new agent pane to ws0; it should land above the topmost ws0 pane.
+        let b = state.workspaces[0].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        mark_agent(&mut state, 0, 0, b);
+        state.reconcile_agent_manual_order();
+
+        assert_eq!(manual_order_pane_ids(&state), vec![b, a, c]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn manual_order_new_workspace_agent_lands_at_top() {
+        let first = Workspace::test_new("one");
+        let a = first.tabs[0].root_pane;
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![first];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        state.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        mark_agent(&mut state, 0, 0, a);
+        state.reconcile_agent_manual_order();
+        assert_eq!(manual_order_pane_ids(&state), vec![a]);
+
+        // A brand new workspace with no pane in the order lands at the very top.
+        let second = Workspace::test_new("two");
+        let c = second.tabs[0].root_pane;
+        state.workspaces.push(second);
+        state.ensure_test_terminals();
+        mark_agent(&mut state, 1, 0, c);
+        state.reconcile_agent_manual_order();
+
+        assert_eq!(manual_order_pane_ids(&state), vec![c, a]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_agent_reorders_within_and_cross_workspace() {
+        let (mut state, a, b, c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        assert_eq!(manual_order_pane_ids(&state), vec![a, b, c]);
+
+        // Move the ws1 pane C to the very top (cross-workspace).
+        assert!(state.move_agent(c, 0));
+        assert_eq!(manual_order_pane_ids(&state), vec![c, a, b]);
+
+        // Move A down to the end (within-list).
+        assert!(state.move_agent(a, state.agent_manual_order.order.len()));
+        assert_eq!(manual_order_pane_ids(&state), vec![c, b, a]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_agent_clamps_out_of_range_insert_index() {
+        let (mut state, a, b, c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+
+        assert!(state.move_agent(a, 999));
+        assert_eq!(manual_order_pane_ids(&state), vec![b, c, a]);
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn move_agent_noop_for_unknown_pane() {
+        let (mut state, _a, _b, _c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        let before = manual_order_pane_ids(&state);
+
+        assert!(!state.move_agent(crate::layout::PaneId::from_raw(9999), 0));
+        assert_eq!(manual_order_pane_ids(&state), before);
+    }
+
+    #[test]
+    fn manual_order_drops_stale_pane_on_close() {
+        let (mut state, a, b, c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        assert_eq!(manual_order_pane_ids(&state), vec![a, b, c]);
+
+        // close_pane returns false while the workspace still has other panes;
+        // it still removes the pane, which is what matters here.
+        state.workspaces[0].close_pane(b);
+        state.reconcile_agent_manual_order();
+
+        assert_eq!(manual_order_pane_ids(&state), vec![a, c]);
+        assert!(!state.agent_manual_order.known.contains(&b));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn manual_order_snapshot_remaps_panes_by_public_key() {
+        let (mut state, a, b, c) = app_with_agents();
+        state.reconcile_agent_manual_order();
+        state.move_agent(c, 0);
+        assert_eq!(manual_order_pane_ids(&state), vec![c, a, b]);
+
+        let keys = state.agent_manual_order.to_public_keys(&state.workspaces);
+        assert_eq!(keys.len(), 3);
+
+        // Simulate the PaneId remap that restore performs: reassign fresh pane
+        // ids to the same public pane numbers.
+        let mut remap = std::collections::HashMap::new();
+        for ws in &mut state.workspaces {
+            let new_map: std::collections::HashMap<crate::layout::PaneId, usize> = ws
+                .public_pane_numbers
+                .iter()
+                .map(|(old, number)| {
+                    let new_id = crate::layout::PaneId::alloc();
+                    remap.insert(*old, new_id);
+                    (new_id, *number)
+                })
+                .collect();
+            ws.public_pane_numbers = new_map;
+        }
+
+        let rebuilt =
+            crate::app::state::AgentManualOrder::from_public_keys(&keys, &state.workspaces);
+        assert!(rebuilt.seeded);
+        // Order preserved by stable keys.
+        assert_eq!(rebuilt.to_public_keys(&state.workspaces), keys);
+        // Panes were actually remapped to the new ids.
+        let rebuilt_ids: Vec<_> = rebuilt
+            .order
+            .iter()
+            .map(|entry| match entry {
+                crate::app::state::ManualEntry::Pane(pane_id) => *pane_id,
+            })
+            .collect();
+        assert_eq!(rebuilt_ids, vec![remap[&c], remap[&a], remap[&b]]);
+    }
+
+    #[test]
+    fn manual_order_seed_preserves_existing_multi_agent_order() {
+        // Enabling manual mode on an already-populated multi-agent state must
+        // preserve the visible (natural) order.
+        let (mut state, a, b, c) = app_with_agents();
+        assert!(!state.agent_manual_order.seeded);
+
+        state.reconcile_agent_manual_order();
+
+        assert_eq!(manual_order_pane_ids(&state), vec![a, b, c]);
     }
 
     #[test]
