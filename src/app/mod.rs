@@ -266,12 +266,30 @@ fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginR
         .collect()
 }
 
+/// Rebuild the client-only manual agent order from a restored snapshot,
+/// mapping persisted stable keys back to the freshly assigned pane ids.
+fn restore_agent_manual_order(
+    snap: &crate::persist::SessionSnapshot,
+    workspaces: &[crate::workspace::Workspace],
+) -> state::AgentManualOrder {
+    let Some(order) = snap.agent_manual_order.as_ref() else {
+        return state::AgentManualOrder::default();
+    };
+    let keys: Vec<(String, usize)> = order
+        .entries
+        .iter()
+        .map(|entry| (entry.workspace_id.clone(), entry.pane_number))
+        .collect();
+    state::AgentManualOrder::from_public_keys(&keys, workspaces)
+}
+
 fn agent_panel_sort_from_config(
     sort: crate::config::AgentPanelSortConfig,
 ) -> state::AgentPanelSort {
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Manual => state::AgentPanelSort::Manual,
     }
 }
 
@@ -418,6 +436,7 @@ impl App {
             sidebar_width_source,
             sidebar_section_split,
             collapsed_space_keys,
+            agent_manual_order,
         ) = if no_session {
             (
                 Vec::new(),
@@ -427,6 +446,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                state::AgentManualOrder::default(),
             )
         } else if let Some(snap) = crate::persist::load() {
             let history = config
@@ -463,11 +483,13 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    state::AgentManualOrder::default(),
                 )
             } else {
                 crate::logging::session_restored(ws.len(), "ok");
                 let active = snap.active.filter(|&i| i < ws.len());
                 let selected = snap.selected.min(ws.len().saturating_sub(1));
+                let agent_manual_order = restore_agent_manual_order(&snap, &ws);
                 (
                     ws,
                     active,
@@ -480,6 +502,7 @@ impl App {
                     },
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    agent_manual_order,
                 )
             }
         } else {
@@ -491,6 +514,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 std::collections::HashSet::new(),
+                state::AgentManualOrder::default(),
             )
         };
 
@@ -624,6 +648,7 @@ impl App {
             drag: None,
             workspace_presses: HashMap::new(),
             tab_presses: HashMap::new(),
+            agent_press: None,
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -654,6 +679,7 @@ impl App {
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            agent_manual_order,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -882,6 +908,7 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.agent_manual_order = restore_agent_manual_order(snapshot, &app.state.workspaces);
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {

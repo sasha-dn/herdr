@@ -1148,7 +1148,7 @@ impl App {
                         } else {
                             Some(new_name)
                         };
-                        self.dispatch_tui_api_request(
+                        self.dispatch_api_request(
                             "tui.agent.rename",
                             crate::api::schema::Method::AgentRename(
                                 crate::api::schema::AgentRenameParams { target, name },
