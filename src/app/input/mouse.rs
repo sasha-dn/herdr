@@ -6,8 +6,8 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AgentPressState, AppState, ContextMenuKind, ContextMenuState, DragState,
-        DragTarget, MenuListState, Mode, RightClickPassthroughGesture, TabPressState, ViewLayout,
-        WorkspacePressState,
+        DragTarget, ManualEntryRef, MenuListState, Mode, RightClickPassthroughGesture,
+        TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -51,8 +51,8 @@ pub(super) enum MouseAction {
         source_tab_idx: usize,
         insert_idx: usize,
     },
-    MoveAgent {
-        source_pane_id: crate::layout::PaneId,
+    MoveAgentEntry {
+        source: ManualEntryRef,
         insert_idx: usize,
     },
     SetSplitRatio {
@@ -396,7 +396,11 @@ impl AppState {
 
                 if matches!(
                     self.mode,
-                    Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::RenameAgent
+                    Mode::RenameWorkspace
+                        | Mode::RenameTab
+                        | Mode::RenamePane
+                        | Mode::RenameAgent
+                        | Mode::RenameLineSplit
                 ) {
                     let action = self
                         .rename_modal_inner()
@@ -616,6 +620,18 @@ impl AppState {
                         return None;
                     }
 
+                    if self.mouse_capture
+                        && matches!(self.agent_panel_sort, AgentPanelSort::Manual)
+                        && self.on_agent_panel_split_button(mouse.column, mouse.row)
+                    {
+                        // Insert a new empty line-split at the top of the order and
+                        // immediately open rename so the user can name it.
+                        let id = self.agent_manual_order.new_line_split(String::new(), 0);
+                        self.mark_session_dirty();
+                        super::modal::open_rename_line_split(self, id);
+                        return None;
+                    }
+
                     if let Some(target) =
                         self.agent_panel_scrollbar_target_at(mouse.column, mouse.row)
                     {
@@ -632,20 +648,24 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) =
-                        self.agent_detail_target_at(mouse.row)
-                    {
-                        if matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
-                            // Manual mode: record a press so a drag can promote to
-                            // a reorder. A plain click (Up without drag) still
-                            // focuses the pane below.
-                            self.agent_press = Some(AgentPressState {
-                                pane_id,
-                                start_col: mouse.column,
-                                start_row: mouse.row,
-                            });
+                    if matches!(self.agent_panel_sort, AgentPanelSort::Manual) {
+                        if let Some(entry) = self.agent_panel_entry_ref_at_row(mouse.row) {
+                            // Manual mode: record a press so a drag can promote to a
+                            // reorder. On release without a drag, an agent row
+                            // focuses its pane while a line-split row is a no-op.
+                            self.agent_presses.insert(
+                                source_id,
+                                AgentPressState {
+                                    entry,
+                                    start_col: mouse.column,
+                                    start_row: mouse.row,
+                                },
+                            );
                             return None;
                         }
+                    } else if let Some((ws_idx, _tab_idx, pane_id)) =
+                        self.agent_detail_target_at(mouse.row)
+                    {
                         self.mode = Mode::Terminal;
                         return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
@@ -707,13 +727,14 @@ impl AppState {
                 let tab_drop_index = self.tab_drop_index_at(mouse.column, mouse.row);
                 let agent_drop_index = self.agent_panel_drop_index_at_row(mouse.row);
                 if self.drag.is_none() {
-                    if let Some(press) = &self.agent_press {
+                    if let Some(press) = self.agent_presses.get(&source_id) {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
                         if delta_col.max(delta_row) >= AGENT_DRAG_THRESHOLD {
                             self.drag = Some(DragState {
                                 target: DragTarget::AgentReorder {
-                                    source_pane_id: press.pane_id,
+                                    source_id,
+                                    source: press.entry,
                                     insert_idx: agent_drop_index,
                                 },
                             });
@@ -784,10 +805,17 @@ impl AppState {
                         *insert_idx = tab_drop_index;
                     }
                 } else if let Some(DragState {
-                    target: DragTarget::AgentReorder { insert_idx, .. },
+                    target:
+                        DragTarget::AgentReorder {
+                            source_id: drag_source_id,
+                            insert_idx,
+                            ..
+                        },
                 }) = &mut self.drag
                 {
-                    *insert_idx = agent_drop_index;
+                    if *drag_source_id == source_id {
+                        *insert_idx = agent_drop_index;
+                    }
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
                         DragTarget::WorkspaceReorder { .. }
@@ -873,7 +901,6 @@ impl AppState {
                     let was_finalized = selection.is_finalized();
 
                     self.clear_chrome_press(source_id);
-                    self.agent_press = None;
                     self.drag = None;
                     self.selection_autoscroll = None;
                     if was_click {
@@ -897,7 +924,6 @@ impl AppState {
                             self.selection = None;
                             self.selection_autoscroll = None;
                             self.clear_chrome_press(source_id);
-                            self.agent_press = None;
                             self.drag = None;
                             return None;
                         }
@@ -906,10 +932,7 @@ impl AppState {
 
                 let workspace_press = self.workspace_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
-                // ponytail: agent_press isn't per-InputSourceId (see its field decl),
-                // so a foreign chrome drag from another client can't distinguish
-                // ownership here; it's dropped rather than misattributed.
-                let agent_press = self.agent_press.take();
+                let agent_press = self.agent_presses.remove(&source_id);
                 if foreign_chrome_drag {
                     return self.chrome_press_action(workspace_press, tab_press);
                 }
@@ -969,14 +992,12 @@ impl AppState {
                     Some(DragState {
                         target:
                             DragTarget::AgentReorder {
-                                source_pane_id,
+                                source,
                                 insert_idx: Some(insert_idx),
+                                ..
                             },
                     }) => {
-                        return Some(MouseAction::MoveAgent {
-                            source_pane_id,
-                            insert_idx,
-                        });
+                        return Some(MouseAction::MoveAgentEntry { source, insert_idx });
                     }
                     Some(_) => {}
                     None => {
@@ -985,16 +1006,17 @@ impl AppState {
                             return Some(action);
                         }
                         if let Some(press) = agent_press {
-                            if let Some(ws_idx) = self
-                                .workspaces
-                                .iter()
-                                .position(|ws| ws.pane_state(press.pane_id).is_some())
-                            {
-                                self.mode = Mode::Terminal;
-                                return Some(MouseAction::FocusPane {
-                                    ws_idx,
-                                    pane_id: press.pane_id,
-                                });
+                            // A plain click focuses an agent pane; a line-split row
+                            // click is a no-op.
+                            if let ManualEntryRef::Pane(pane_id) = press.entry {
+                                if let Some(ws_idx) = self
+                                    .workspaces
+                                    .iter()
+                                    .position(|ws| ws.pane_state(pane_id).is_some())
+                                {
+                                    self.mode = Mode::Terminal;
+                                    return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                                }
                             }
                         }
                     }
@@ -1153,6 +1175,14 @@ impl AppState {
                         .unwrap_or(ContextMenuKind::Workspace { ws_idx: idx });
                     self.context_menu = Some(ContextMenuState {
                         kind,
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
+                } else if let Some(id) = self.agent_panel_line_split_at_row(mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::LineSplit { id },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
@@ -1534,7 +1564,9 @@ impl AppState {
     }
 
     fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
-        self.tab_presses.contains_key(&source_id) || self.workspace_presses.contains_key(&source_id)
+        self.tab_presses.contains_key(&source_id)
+            || self.workspace_presses.contains_key(&source_id)
+            || self.agent_presses.contains_key(&source_id)
     }
 
     fn chrome_drag_owned_by_other(&self, source_id: crate::app::InputSourceId) -> bool {
@@ -1545,6 +1577,9 @@ impl AppState {
                     source_id: drag_source_id,
                     ..
                 } | DragTarget::TabReorder {
+                    source_id: drag_source_id,
+                    ..
+                } | DragTarget::AgentReorder {
                     source_id: drag_source_id,
                     ..
                 } if drag_source_id != source_id
@@ -1595,6 +1630,7 @@ impl AppState {
     fn clear_chrome_press(&mut self, source_id: crate::app::InputSourceId) {
         self.tab_presses.remove(&source_id);
         self.workspace_presses.remove(&source_id);
+        self.agent_presses.remove(&source_id);
     }
 
     fn mouse_pane_focus_action(&self, pane_id: crate::layout::PaneId) -> Option<MouseAction> {

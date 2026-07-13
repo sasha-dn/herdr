@@ -12,7 +12,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, Palette};
+use crate::app::state::{AgentPanelSort, LineSplitId, ManualEntry, Palette};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -37,6 +37,33 @@ pub(crate) struct AgentPanelEntry {
     pub last_agent_state_change_seq: Option<u64>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
+}
+
+/// A single visible row in the agents panel: either an agent entry or a named
+/// line-split divider. Line-splits only appear in manual sort mode. Client-only
+/// presentation state.
+pub(crate) enum AgentPanelRow {
+    Agent(AgentPanelEntry),
+    LineSplit { id: LineSplitId, name: String },
+}
+
+impl AgentPanelRow {
+    /// Content-row height of this row (excluding the trailing gap). Agent rows
+    /// render however many lines `sidebar_agents`/`rows_by_agent` configure for
+    /// that agent (clamped to `body_height`); line-splits are a single rule.
+    fn content_height(&self, app: &AppState, body_height: u16) -> u16 {
+        match self {
+            AgentPanelRow::Agent(entry) => agent_entry_height_in_body(app, entry, body_height),
+            AgentPanelRow::LineSplit { .. } => 1,
+        }
+    }
+}
+
+/// Screen placement for one visible agent-panel row.
+pub(crate) struct AgentPanelRowArea {
+    pub row_idx: usize,
+    pub y: u16,
+    pub height: u16,
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -108,6 +135,32 @@ fn active_agent_view_label(app: &AppState) -> Option<&str> {
     app.agent_view_override
         .as_ref()
         .map(|view| view.label.as_deref().unwrap_or("filtered"))
+}
+
+const AGENT_PANEL_SPLIT_LABEL: &str = "+ split";
+
+/// Mouse-first "+ split" affordance rect, placed just left of the sort toggle in
+/// the agents header. Only meaningful in manual mode; returns the empty rect
+/// otherwise or when there is no room.
+pub(crate) fn agent_panel_split_button_rect(area: Rect, sort: AgentPanelSort) -> Rect {
+    if !matches!(sort, AgentPanelSort::Manual) || area.width == 0 || area.height < 2 {
+        return Rect::default();
+    }
+    let toggle = agent_panel_toggle_rect(area, sort);
+    if toggle == Rect::default() {
+        return Rect::default();
+    }
+    let width = display_width_u16(AGENT_PANEL_SPLIT_LABEL);
+    // One-column gap between the affordance and the toggle.
+    let right = toggle.x.saturating_sub(1);
+    if right <= area.x || width == 0 {
+        return Rect::default();
+    }
+    let x = right.saturating_sub(width);
+    if x < area.x {
+        return Rect::default();
+    }
+    Rect::new(x, area.y + 1, width, 1)
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -193,19 +246,126 @@ fn collect_agent_panel_entries_with_runtimes(
         // in `order` sort by their position; any not-yet-reconciled entries
         // keep their natural relative order and land at the end (defensive
         // fallback - reconcile normally keeps `order` in sync before render).
+        // Line-split entries in the manual order aren't AgentPanelEntry rows,
+        // so they're skipped here.
         let order_pos: std::collections::HashMap<crate::layout::PaneId, usize> = app
             .agent_manual_order
             .order
             .iter()
             .enumerate()
-            .map(|(idx, entry)| match entry {
-                crate::app::state::ManualEntry::Pane(pane_id) => (*pane_id, idx),
+            .filter_map(|(idx, entry)| match entry {
+                ManualEntry::Pane(pane_id) => Some((*pane_id, idx)),
+                ManualEntry::LineSplit { .. } => None,
             })
             .collect();
         entries.sort_by_key(|entry| order_pos.get(&entry.pane_id).copied().unwrap_or(usize::MAX));
     }
 
     entries
+}
+
+pub(crate) fn agent_panel_rows(app: &AppState) -> Vec<AgentPanelRow> {
+    agent_panel_rows_with_runtimes(app, None)
+}
+
+pub(crate) fn agent_panel_rows_from(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Vec<AgentPanelRow> {
+    agent_panel_rows_with_runtimes(app, Some(terminal_runtimes))
+}
+
+/// Full ordered list of visible agent-panel rows. In Spaces/Priority the rows
+/// are the sorted agent entries. In Manual, agents and line-splits are
+/// interleaved by walking `agent_manual_order.order`; agents not yet placed in
+/// the order fall back to the end. Pure.
+fn agent_panel_rows_with_runtimes(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelRow> {
+    let entries = agent_panel_entries_with_runtimes(app, terminal_runtimes);
+    if !matches!(app.agent_panel_sort, AgentPanelSort::Manual) {
+        return entries.into_iter().map(AgentPanelRow::Agent).collect();
+    }
+
+    // Index agents by pane so the flat order can pull them in position.
+    let mut by_pane: std::collections::HashMap<crate::layout::PaneId, AgentPanelEntry> = entries
+        .into_iter()
+        .map(|entry| (entry.pane_id, entry))
+        .collect();
+
+    let mut rows = Vec::new();
+    for entry in &app.agent_manual_order.order {
+        match entry {
+            ManualEntry::Pane(pane_id) => {
+                if let Some(agent) = by_pane.remove(pane_id) {
+                    rows.push(AgentPanelRow::Agent(agent));
+                }
+            }
+            ManualEntry::LineSplit { id, name } => {
+                rows.push(AgentPanelRow::LineSplit {
+                    id: *id,
+                    name: name.clone(),
+                });
+            }
+        }
+    }
+    // Any agents not present in the manual order (not yet reconciled) land last,
+    // in natural order.
+    for entry in agent_panel_entries_with_runtimes(app, terminal_runtimes) {
+        if let Some(agent) = by_pane.remove(&entry.pane_id) {
+            rows.push(AgentPanelRow::Agent(agent));
+        }
+    }
+
+    rows
+}
+
+/// Row index (in the full [`agent_panel_rows`] list) of the agent row for
+/// `pane_id`, if present.
+pub(crate) fn agent_panel_row_index_of_pane(
+    app: &AppState,
+    pane_id: crate::layout::PaneId,
+) -> Option<usize> {
+    agent_panel_rows(app)
+        .iter()
+        .position(|row| matches!(row, AgentPanelRow::Agent(entry) if entry.pane_id == pane_id))
+}
+
+/// Visible-row layout for the agent panel: walks the ordered rows from `scroll`,
+/// assigning each a screen `y` and content height, stopping when the next row no
+/// longer fits. Mirrors the variable-height workspace-list layout.
+pub(crate) fn compute_agent_panel_row_areas(
+    app: &AppState,
+    rows: &[AgentPanelRow],
+    body: Rect,
+    scroll: usize,
+) -> Vec<AgentPanelRowArea> {
+    let mut areas = Vec::new();
+    if body.width == 0 || body.height == 0 {
+        return areas;
+    }
+    let body_bottom = body.y + body.height;
+    let mut row_y = body.y;
+    let row_count = rows.len();
+    for (row_idx, row) in rows.iter().enumerate().skip(scroll) {
+        let height = row.content_height(app, body.height);
+        if row_y.saturating_add(height) > body_bottom {
+            break;
+        }
+        areas.push(AgentPanelRowArea {
+            row_idx,
+            y: row_y,
+            height,
+        });
+        row_y = row_y.saturating_add(height);
+        if row_idx + 1 < row_count {
+            row_y = row_y
+                .saturating_add(app.sidebar_agents.row_gap)
+                .min(body_bottom);
+        }
+    }
+    areas
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
@@ -601,22 +761,7 @@ fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> 
     if body.width == 0 || body.height == 0 {
         return 0;
     }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
-        if used_rows.saturating_add(height) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(height);
-        visible += 1;
-        used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
-            .min(body.height);
-    }
-    visible
+    compute_agent_panel_row_areas(app, &agent_panel_rows(app), body, scroll).len()
 }
 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
@@ -1003,26 +1148,34 @@ pub(crate) fn workspace_drop_indicator_row(
         .find_map(|(candidate, row)| (candidate == target).then_some(row))
 }
 
-/// Screen row for the manual-agent drop indicator at flat `insert_idx`.
-/// Entries are laid out as two content rows plus one gap row; the indicator
-/// sits at the top of the target slot (the gap row above the entry, or the
-/// panel top for the first slot).
+/// Screen row for the manual-agent drop indicator at flat `insert_idx`, computed
+/// from the variable-height visible row areas. The indicator sits at the top of
+/// the target slot (the gap row above the entry, or the panel top for the first
+/// slot); inserting past the last visible row draws in the gap below it.
 pub(crate) fn agent_panel_drop_indicator_row(
+    areas: &[AgentPanelRowArea],
     body: Rect,
-    scroll: usize,
     insert_idx: usize,
 ) -> Option<u16> {
-    if body.height == 0 || insert_idx < scroll {
+    if body.height == 0 {
         return None;
     }
-    let j = insert_idx - scroll;
-    let row = if j == 0 {
-        body.y
-    } else {
-        body.y
-            .saturating_add((3u16.saturating_mul(j as u16)).saturating_sub(1))
-    };
-    (row < body.y + body.height).then_some(row)
+    let body_bottom = body.y + body.height;
+    if let Some(area) = areas.iter().find(|area| area.row_idx == insert_idx) {
+        let y = if area.y == body.y {
+            body.y
+        } else {
+            area.y.saturating_sub(1)
+        };
+        return (y < body_bottom).then_some(y);
+    }
+    if let Some(last) = areas.last() {
+        if insert_idx >= last.row_idx.saturating_add(1) {
+            let y = last.y.saturating_add(last.height);
+            return (y < body_bottom).then_some(y);
+        }
+    }
+    None
 }
 
 pub(super) fn render_sidebar(
@@ -1476,6 +1629,34 @@ fn render_workspace_list(
     }
 }
 
+/// Draw a named line-split divider as a full-width rule with the name embedded,
+/// e.g. `── scheduled ──────`. An empty name renders a plain rule.
+fn render_line_split_row(frame: &mut Frame, body: Rect, y: u16, name: &str, p: &Palette) {
+    let width = body.width as usize;
+    if width == 0 {
+        return;
+    }
+    let style = Style::default().fg(p.surface_dim);
+    let trimmed = name.trim();
+    let text = if trimmed.is_empty() {
+        "─".repeat(width)
+    } else {
+        let label = format!("── {trimmed} ");
+        let label_width = display_width(&label);
+        if label_width >= width {
+            truncate_end(&label, width)
+        } else {
+            let mut text = label;
+            text.push_str(&"─".repeat(width - label_width));
+            text
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(text, style)),
+        Rect::new(body.x, y, body.width, 1),
+    );
+}
+
 fn render_agent_detail(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1519,15 +1700,27 @@ fn render_agent_detail(
             toggle_rect,
         );
     }
+    if app.mouse_capture {
+        let split_rect = agent_panel_split_button_rect(area, app.agent_panel_sort);
+        if split_rect != Rect::default() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    AGENT_PANEL_SPLIT_LABEL,
+                    Style::default().fg(p.overlay0),
+                )),
+                split_rect,
+            );
+        }
+    }
 
-    let details = agent_panel_entries_from(app, terminal_runtimes);
+    let rows = agent_panel_rows_from(app, terminal_runtimes);
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
     if body == Rect::default() {
         return;
     }
-    if details.is_empty() && app.agent_view_override.is_some() {
+    if rows.is_empty() && app.agent_view_override.is_some() {
         frame.render_widget(
             Paragraph::new(" no matching agents")
                 .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
@@ -1536,58 +1729,57 @@ fn render_agent_detail(
         return;
     }
 
-    let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
-        let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
-        let height = (rows.len().max(1) as u16).min(body.height);
-        if row_y.saturating_add(height) > body_bottom {
-            break;
-        }
+    let areas = compute_agent_panel_row_areas(app, &rows, body, app.agent_panel_scroll);
+    for area_row in &areas {
+        let row = &rows[area_row.row_idx];
+        match row {
+            AgentPanelRow::Agent(detail) => {
+                let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
+                let label_color = state_label_color(detail.state, detail.seen, p);
+                let resolved_rows = resolved_agent_rows(app, detail);
+                let height = (resolved_rows.len().max(1) as u16).min(body.height);
 
-        let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
-            Style::default().bg(p.active_row_bg)
-        } else {
-            Style::default()
-        };
-        let name_style = if is_active {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
-        };
-        let status_style = if is_active {
-            Style::default().fg(label_color)
-        } else {
-            Style::default().fg(label_color).add_modifier(Modifier::DIM)
-        };
-        let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+                let row_style = if is_active {
+                    Style::default().bg(p.active_row_bg)
+                } else {
+                    Style::default()
+                };
+                let name_style = if is_active {
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+                };
+                let status_style = if is_active {
+                    Style::default().fg(label_color)
+                } else {
+                    Style::default().fg(label_color).add_modifier(Modifier::DIM)
+                };
+                let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+                let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
 
-        for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
-            let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
-            spans.extend(resolved_token_spans(
-                resolved,
-                state_icon,
-                status_style,
-                name_style,
-                agent_style,
-                agent_style,
-                p,
-                body.width
-                    .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
-            ));
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(row_style),
-                Rect::new(body.x, row_y + row_index as u16, body.width, 1),
-            );
+                for (row_index, resolved) in resolved_rows.iter().take(height as usize).enumerate() {
+                    let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];
+                    spans.extend(resolved_token_spans(
+                        resolved,
+                        state_icon,
+                        status_style,
+                        name_style,
+                        agent_style,
+                        agent_style,
+                        p,
+                        body.width
+                            .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
+                    ));
+                    frame.render_widget(
+                        Paragraph::new(Line::from(spans)).style(row_style),
+                        Rect::new(body.x, area_row.y + row_index as u16, body.width, 1),
+                    );
+                }
+            }
+            AgentPanelRow::LineSplit { name, .. } => {
+                render_line_split_row(frame, body, area_row.y, name, p);
+            }
         }
-        row_y = row_y
-            .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
-            .min(body_bottom);
     }
 
     if let Some(insert_idx) = match app.drag.as_ref().map(|drag| &drag.target) {
@@ -1597,7 +1789,7 @@ fn render_agent_detail(
         }) => Some(*insert_idx),
         _ => None,
     } {
-        if let Some(y) = agent_panel_drop_indicator_row(body, app.agent_panel_scroll, insert_idx) {
+        if let Some(y) = agent_panel_drop_indicator_row(&areas, body, insert_idx) {
             let indicator_right = scrollbar_rect
                 .map(|rect| rect.x)
                 .unwrap_or(body.x + body.width);
@@ -2623,13 +2815,119 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         // Seed the natural order, then reverse it via a manual move.
         app.reconcile_agent_manual_order();
         let last = agent_panel_entries(&app)[2].pane_id;
-        app.move_agent(last, 0);
+        app.move_agent_entry(crate::app::state::ManualEntryRef::Pane(last), 0);
 
         let labels: Vec<String> = agent_panel_entries(&app)
             .into_iter()
             .map(|entry| entry.primary_label)
             .collect();
         assert_eq!(labels, ["three", "one", "two"]);
+    }
+
+    fn manual_app_with_two_agents() -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Manual;
+        for ws_idx in 0..app.workspaces.len() {
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        }
+        app.reconcile_agent_manual_order();
+        app
+    }
+
+    #[test]
+    fn agent_panel_rows_interleave_line_split_between_agents() {
+        let mut app = manual_app_with_two_agents();
+        // Insert a line-split between the two agents (flat index 1).
+        let id = app
+            .agent_manual_order
+            .new_line_split("scheduled".to_string(), 1);
+
+        let rows = agent_panel_rows(&app);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0], AgentPanelRow::Agent(_)));
+        assert!(matches!(
+            &rows[1],
+            AgentPanelRow::LineSplit { id: row_id, name } if *row_id == id && name == "scheduled"
+        ));
+        assert!(matches!(rows[2], AgentPanelRow::Agent(_)));
+    }
+
+    #[test]
+    fn agent_panel_rows_hide_line_splits_outside_manual_mode() {
+        let mut app = manual_app_with_two_agents();
+        app.agent_manual_order
+            .new_line_split("scheduled".to_string(), 1);
+        app.agent_panel_sort = crate::app::state::AgentPanelSort::Spaces;
+
+        let rows = agent_panel_rows(&app);
+        assert_eq!(rows.len(), 2);
+        assert!(rows
+            .iter()
+            .all(|row| matches!(row, AgentPanelRow::Agent(_))));
+    }
+
+    fn render_agent_panel_to_backend(app: &AppState) -> String {
+        let area = Rect::new(0, 0, 30, 18);
+        let mut terminal =
+            Terminal::new(TestBackend::new(30, 18)).expect("test terminal should initialize");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_agent_detail(app, &runtimes, frame, area))
+            .expect("agent detail should render");
+        let buffer = terminal.backend().buffer().clone();
+        let mut lines = Vec::new();
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn named_line_split_renders_rule_with_name() {
+        let mut app = manual_app_with_two_agents();
+        app.agent_manual_order
+            .new_line_split("scheduled".to_string(), 0);
+        let rendered = render_agent_panel_to_backend(&app);
+        assert!(
+            rendered.contains("scheduled"),
+            "expected named line-split, got:\n{rendered}"
+        );
+        let split_line = rendered
+            .lines()
+            .find(|line| line.contains("scheduled"))
+            .expect("line-split row present");
+        assert!(
+            split_line.contains("─"),
+            "line-split should be drawn as a rule: {split_line:?}"
+        );
+    }
+
+    #[test]
+    fn empty_line_split_renders_plain_rule() {
+        let mut app = manual_app_with_two_agents();
+        app.agent_manual_order.new_line_split(String::new(), 0);
+        let rendered = render_agent_panel_to_backend(&app);
+        // The first body row is the empty line-split: a run of rule characters.
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.trim_end().chars().count() >= 10
+                    && line.chars().all(|ch| ch == '─' || ch == ' ')
+                    && line.contains("─")),
+            "expected a plain rule row, got:\n{rendered}"
+        );
     }
 
     #[cfg(unix)]
