@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashSet, VecDeque},
     io::Write,
     os::fd::RawFd,
     path::PathBuf,
@@ -10,42 +11,31 @@ use super::{
     LimitedRead, Signal,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcGroupMember {
+    pid: u32,
+    comm: String,
+}
+
 pub fn raise_server_nofile_limit() {}
 
 /// Collect the foreground terminal job for a given child PID.
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     let tpgid = foreground_process_group_id(child_pid)?;
-    let mut processes = Vec::new();
-
-    for entry in std::fs::read_dir("/proc").ok()? {
-        let entry = entry.ok()?;
-        let file_name = entry.file_name();
-        let pid_str = file_name.to_str()?;
-        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-
-        let pid: u32 = match pid_str.parse() {
-            Ok(pid) => pid,
-            Err(_) => continue,
-        };
-
-        let Some((pgrp, name)) = process_pgrp_and_comm(pid) else {
-            continue;
-        };
-        if pgrp as u32 != tpgid {
-            continue;
-        }
-
-        let argv = process_argv(pid);
-        processes.push(ForegroundProcess {
-            pid,
-            name,
-            argv0: None,
-            cmdline: argv.as_ref().map(|parts| parts.join(" ")),
-            argv,
-        });
-    }
+    let members = foreground_process_group_members(child_pid, tpgid)?;
+    let processes = members
+        .into_iter()
+        .map(|member| {
+            let argv = process_argv(member.pid);
+            ForegroundProcess {
+                pid: member.pid,
+                name: member.comm,
+                argv0: None,
+                cmdline: argv.as_ref().map(|parts| parts.join(" ")),
+                argv,
+            }
+        })
+        .collect::<Vec<_>>();
 
     if processes.is_empty() {
         return None;
@@ -55,6 +45,95 @@ pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
         process_group_id: tpgid,
         processes,
     })
+}
+
+fn foreground_process_group_members(
+    child_pid: u32,
+    process_group_id: u32,
+) -> Option<Vec<ProcGroupMember>> {
+    foreground_process_group_members_with(
+        child_pid,
+        process_group_id,
+        process_task_ids,
+        process_task_children,
+        live_process_group_member,
+    )
+}
+
+fn foreground_process_group_members_with(
+    child_pid: u32,
+    process_group_id: u32,
+    task_ids: impl FnMut(u32) -> Vec<u32>,
+    task_children: impl FnMut(u32, u32) -> Vec<u32>,
+    mut live_member: impl FnMut(u32, u32) -> Option<ProcGroupMember>,
+) -> Option<Vec<ProcGroupMember>> {
+    let mut members = process_tree_pids([child_pid, process_group_id], task_ids, task_children)
+        .into_iter()
+        .filter_map(|pid| live_member(process_group_id, pid))
+        .collect::<Vec<_>>();
+    members.sort_unstable_by_key(|member| member.pid);
+    (!members.is_empty()).then_some(members)
+}
+
+fn process_tree_pids(
+    roots: impl IntoIterator<Item = u32>,
+    mut task_ids: impl FnMut(u32) -> Vec<u32>,
+    mut task_children: impl FnMut(u32, u32) -> Vec<u32>,
+) -> Vec<u32> {
+    let mut pending = VecDeque::new();
+    let mut visited = HashSet::new();
+    for pid in roots {
+        if pid > 0 && visited.insert(pid) {
+            pending.push_back(pid);
+        }
+    }
+
+    let mut pids = Vec::new();
+    while let Some(pid) = pending.pop_front() {
+        pids.push(pid);
+        for tid in task_ids(pid) {
+            for child_pid in task_children(pid, tid) {
+                if child_pid > 0 && visited.insert(child_pid) {
+                    pending.push_back(child_pid);
+                }
+            }
+        }
+    }
+    pids
+}
+
+fn process_task_ids(pid: u32) -> Vec<u32> {
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| numeric_file_name(&entry))
+        .collect()
+}
+
+fn process_task_children(pid: u32, tid: u32) -> Vec<u32> {
+    let Some(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")).ok()
+    else {
+        return Vec::new();
+    };
+    children
+        .split_whitespace()
+        .filter_map(|child| child.parse::<u32>().ok())
+        .collect()
+}
+
+fn numeric_file_name(entry: &std::fs::DirEntry) -> Option<u32> {
+    let file_name = entry.file_name();
+    let value = file_name.to_str()?;
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn live_process_group_member(process_group_id: u32, pid: u32) -> Option<ProcGroupMember> {
+    let (pgrp, comm) = process_pgrp_and_comm(pid)?;
+    (pgrp > 0 && pgrp as u32 == process_group_id).then_some(ProcGroupMember { pid, comm })
 }
 
 pub fn foreground_group_leader_job(process_group_id: u32) -> Option<ForegroundJob> {
@@ -503,10 +582,143 @@ fn process_session_id(pid: u32) -> Option<i32> {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    use std::{cell::RefCell, collections::HashMap};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn foreground_members_follow_the_pane_tree_and_filter_by_process_group() {
+        let tasks = HashMap::from([
+            (100, vec![100, 101]),
+            (200, vec![200]),
+            (201, vec![201]),
+            (210, vec![210]),
+            (220, vec![220]),
+            (221, vec![221]),
+            (300, vec![300]),
+        ]);
+        let children = HashMap::from([
+            ((100, 100), vec![200, 201, 300]),
+            ((100, 101), vec![210]),
+            ((200, 200), vec![220]),
+            ((220, 220), vec![221]),
+        ]);
+        let processes = HashMap::from([
+            (100, (100, "shell")),
+            (200, (200, "leader")),
+            (201, (200, "pipeline")),
+            (210, (200, "thread-child")),
+            (220, (220, "intermediate")),
+            (221, (200, "nested-agent")),
+            (300, (300, "background")),
+            (9999, (200, "unrelated-host-process")),
+        ]);
+        let task_reads = RefCell::new(Vec::new());
+        let child_reads = RefCell::new(Vec::new());
+        let member_reads = RefCell::new(Vec::new());
+
+        let members = foreground_process_group_members_with(
+            100,
+            200,
+            |pid| {
+                task_reads.borrow_mut().push(pid);
+                tasks.get(&pid).cloned().unwrap_or_default()
+            },
+            |pid, tid| {
+                child_reads.borrow_mut().push((pid, tid));
+                children.get(&(pid, tid)).cloned().unwrap_or_default()
+            },
+            |process_group_id, pid| {
+                member_reads.borrow_mut().push(pid);
+                let (pgrp, comm) = processes.get(&pid)?;
+                (*pgrp == process_group_id).then(|| ProcGroupMember {
+                    pid,
+                    comm: (*comm).to_string(),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            members
+                .into_iter()
+                .map(|member| (member.pid, member.comm))
+                .collect::<Vec<_>>(),
+            vec![
+                (200, "leader".to_string()),
+                (201, "pipeline".to_string()),
+                (210, "thread-child".to_string()),
+                (221, "nested-agent".to_string()),
+            ]
+        );
+        assert!(child_reads.borrow().contains(&(100, 101)));
+        assert!(task_reads.borrow().contains(&220));
+        assert!(!task_reads.borrow().contains(&9999));
+        assert!(!member_reads.borrow().contains(&9999));
+    }
+
+    #[test]
+    fn foreground_members_degrade_to_the_direct_group_leader() {
+        let members = foreground_process_group_members_with(
+            100,
+            200,
+            |_| Vec::new(),
+            |_, _| Vec::new(),
+            |process_group_id, pid| {
+                (pid == process_group_id).then(|| ProcGroupMember {
+                    pid,
+                    comm: "leader".to_string(),
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            members,
+            vec![ProcGroupMember {
+                pid: 200,
+                comm: "leader".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn foreground_members_observe_new_children_without_a_snapshot_cache() {
+        let children = RefCell::new(HashMap::from([((100, 100), vec![200])]));
+        let discover = || {
+            foreground_process_group_members_with(
+                100,
+                200,
+                |pid| vec![pid],
+                |pid, tid| {
+                    children
+                        .borrow()
+                        .get(&(pid, tid))
+                        .cloned()
+                        .unwrap_or_default()
+                },
+                |process_group_id, pid| {
+                    [200, 201]
+                        .contains(&pid)
+                        .then(|| ProcGroupMember {
+                            pid,
+                            comm: format!("member-{pid}"),
+                        })
+                        .filter(|_| process_group_id == 200)
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|member| member.pid)
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(discover(), vec![200]);
+        children.borrow_mut().insert((100, 100), vec![200, 201]);
+        assert_eq!(discover(), vec![200, 201]);
     }
 
     #[test]
