@@ -6,6 +6,7 @@
 - Added a sidebar "Tabs" section that lists every non-agent tab across all spaces as a two-line row (tab name over its space). Tabs can be reordered by dragging (visual only - it never changes the real tab order in any workspace), renamed by double-clicking, and scrolled when they overflow. The section collapses when there are no non-agent tabs.
 
 ### Changed
+- Double-clicking an agent in the sidebar now renames its tab (matching the Tabs section) instead of renaming the agent.
 - Clicking a space now returns to that workspace's latest active tab instead of a separately tracked home tab.
 
 ## [0.8.2] - 2026-08-19
