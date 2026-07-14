@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 
 use crate::{
     app::{
-        state::{AppState, SettingsSection, THEME_NAMES},
+        state::{AppState, ExperimentSetting, SettingsSection, THEME_NAMES},
         App, Mode,
     },
     config::{StatusIndicatorStyle, ToastDelivery},
@@ -18,7 +18,23 @@ pub(super) enum SettingsAction {
     SaveSound(bool),
     SaveToastDelivery(ToastDelivery),
     SaveAgentBorderLabels(bool),
+    SavePaneHistory(bool),
+    SaveSwitchAsciiInputSourceInPrefix(bool),
     InstallRecommendedIntegrations,
+}
+
+/// Map an Experiments row index to the toggle action that flips it.
+fn experiment_toggle_action(state: &AppState, idx: usize) -> Option<SettingsAction> {
+    match ExperimentSetting::ALL.get(idx).copied()? {
+        ExperimentSetting::PaneHistory => Some(SettingsAction::SavePaneHistory(
+            !ExperimentSetting::PaneHistory.enabled(state),
+        )),
+        ExperimentSetting::SwitchAsciiInputSourceInPrefix => {
+            Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(
+                !ExperimentSetting::SwitchAsciiInputSourceInPrefix.enabled(state),
+            ))
+        }
+    }
 }
 
 impl App {
@@ -32,6 +48,12 @@ impl App {
                 SettingsAction::SaveToastDelivery(delivery) => self.save_toast_delivery(delivery),
                 SettingsAction::SaveAgentBorderLabels(enabled) => {
                     self.save_agent_border_labels(enabled)
+                }
+                SettingsAction::SavePaneHistory(enabled) => {
+                    self.save_pane_history_persistence(enabled)
+                }
+                SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
+                    self.save_switch_ascii_input_source_in_prefix(enabled)
                 }
                 SettingsAction::InstallRecommendedIntegrations => {
                     self.install_recommended_integrations()

@@ -7,7 +7,7 @@ use crate::{
     app::state::{
         AgentPanelSort, AgentPressState, AppState, ContextMenuKind, ContextMenuState, DragState,
         DragTarget, ManualEntryRef, MenuListState, Mode, RightClickPassthroughGesture,
-        TabPressState, ViewLayout, WorkspacePressState,
+        TabPressState, TabSectionPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -34,6 +34,12 @@ pub(super) enum MouseAction {
     FocusTab {
         tab_idx: usize,
     },
+    /// Activate a tab in a specific workspace, used by the sidebar Tabs section
+    /// (which can span spaces).
+    FocusTabInWorkspace {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -53,6 +59,10 @@ pub(super) enum MouseAction {
     },
     MoveAgentEntry {
         source: ManualEntryRef,
+        insert_idx: usize,
+    },
+    MoveTabSectionEntry {
+        source: crate::app::state::TabRef,
         insert_idx: usize,
     },
     SetSplitRatio {
@@ -440,11 +450,11 @@ impl AppState {
                     return None;
                 }
 
-                if self.on_sidebar_section_divider(mouse.column, mouse.row) {
+                if let Some(index) = self.on_sidebar_section_divider(mouse.column, mouse.row) {
                     self.drag = Some(DragState {
-                        target: DragTarget::SidebarSectionDivider,
+                        target: DragTarget::SidebarSectionDivider { index },
                     });
-                    self.set_sidebar_section_split(mouse.row);
+                    self.set_sidebar_section_split(index, mouse.row);
                     return None;
                 }
 
@@ -609,6 +619,33 @@ impl AppState {
                         return None;
                     }
 
+                    if let Some(target) =
+                        self.tab_section_scrollbar_target_at(mouse.column, mouse.row)
+                    {
+                        match target {
+                            ScrollbarClickTarget::Thumb { grab_row_offset } => {
+                                self.drag = Some(DragState {
+                                    target: DragTarget::TabSectionScrollbar { grab_row_offset },
+                                });
+                            }
+                            ScrollbarClickTarget::Track { offset_from_bottom } => {
+                                self.set_tab_section_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
+                        return None;
+                    }
+
+                    if let Some(entry) = self.tab_section_ref_at_row(mouse.row) {
+                        // Record a press so a drag can promote to a reorder. On
+                        // release without a drag, the row activates its tab.
+                        self.tab_section_press = Some(TabSectionPressState {
+                            entry,
+                            start_col: mouse.column,
+                            start_row: mouse.row,
+                        });
+                        return None;
+                    }
+
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
                         self.agent_panel_sort = match self.agent_panel_sort {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,
@@ -726,8 +763,20 @@ impl AppState {
                 let workspace_drop_target = self.workspace_drop_target_at_row(mouse.row);
                 let tab_drop_index = self.tab_drop_index_at(mouse.column, mouse.row);
                 let agent_drop_index = self.agent_panel_drop_index_at_row(mouse.row);
+                let tab_section_drop_index = self.tab_section_drop_index_at_row(mouse.row);
                 if self.drag.is_none() {
-                    if let Some(press) = self.agent_presses.get(&source_id) {
+                    if let Some(press) = &self.tab_section_press {
+                        let delta_col = mouse.column.abs_diff(press.start_col);
+                        let delta_row = mouse.row.abs_diff(press.start_row);
+                        if delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD {
+                            self.drag = Some(DragState {
+                                target: DragTarget::TabSectionReorder {
+                                    source: press.entry.clone(),
+                                    insert_idx: tab_section_drop_index,
+                                },
+                            });
+                        }
+                    } else if let Some(press) = self.agent_presses.get(&source_id) {
                         let delta_col = mouse.column.abs_diff(press.start_col);
                         let delta_row = mouse.row.abs_diff(press.start_row);
                         if delta_col.max(delta_row) >= AGENT_DRAG_THRESHOLD {
@@ -816,11 +865,17 @@ impl AppState {
                     if *drag_source_id == source_id {
                         *insert_idx = agent_drop_index;
                     }
+                } else if let Some(DragState {
+                    target: DragTarget::TabSectionReorder { insert_idx, .. },
+                }) = &mut self.drag
+                {
+                    *insert_idx = tab_section_drop_index;
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
                         DragTarget::WorkspaceReorder { .. }
                         | DragTarget::TabReorder { .. }
-                        | DragTarget::AgentReorder { .. } => {}
+                        | DragTarget::AgentReorder { .. }
+                        | DragTarget::TabSectionReorder { .. } => {}
                         DragTarget::WorkspaceListScrollbar { grab_row_offset } => {
                             if let Some(offset_from_bottom) =
                                 self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
@@ -833,6 +888,13 @@ impl AppState {
                                 self.agent_panel_offset_for_drag_row(mouse.row, *grab_row_offset)
                             {
                                 self.set_agent_panel_offset_from_bottom(offset_from_bottom);
+                            }
+                        }
+                        DragTarget::TabSectionScrollbar { grab_row_offset } => {
+                            if let Some(offset_from_bottom) =
+                                self.tab_section_offset_for_drag_row(mouse.row, *grab_row_offset)
+                            {
+                                self.set_tab_section_offset_from_bottom(offset_from_bottom);
                             }
                         }
                         DragTarget::PaneSplit {
@@ -883,8 +945,8 @@ impl AppState {
                         DragTarget::SidebarDivider => {
                             self.set_manual_sidebar_width(mouse.column);
                         }
-                        DragTarget::SidebarSectionDivider => {
-                            self.set_sidebar_section_split(mouse.row);
+                        DragTarget::SidebarSectionDivider { index } => {
+                            self.set_sidebar_section_split(*index, mouse.row);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
@@ -924,7 +986,12 @@ impl AppState {
                             self.selection = None;
                             self.selection_autoscroll = None;
                             self.clear_chrome_press(source_id);
-                            self.drag = None;
+                            // Only clear a drag this source actually owns - a
+                            // foreign drag (another client's active reorder)
+                            // must survive this client's own forwarded mouse-up.
+                            if !foreign_chrome_drag {
+                                self.drag = None;
+                            }
                             return None;
                         }
                     }
@@ -933,6 +1000,7 @@ impl AppState {
                 let workspace_press = self.workspace_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
                 let agent_press = self.agent_presses.remove(&source_id);
+                let tab_section_press = self.tab_section_press.take();
                 if foreign_chrome_drag {
                     return self.chrome_press_action(workspace_press, tab_press);
                 }
@@ -999,6 +1067,15 @@ impl AppState {
                     }) => {
                         return Some(MouseAction::MoveAgentEntry { source, insert_idx });
                     }
+                    Some(DragState {
+                        target:
+                            DragTarget::TabSectionReorder {
+                                source,
+                                insert_idx: Some(insert_idx),
+                            },
+                    }) => {
+                        return Some(MouseAction::MoveTabSectionEntry { source, insert_idx });
+                    }
                     Some(_) => {}
                     None => {
                         if let Some(action) = self.chrome_press_action(workspace_press, tab_press)
@@ -1017,6 +1094,14 @@ impl AppState {
                                     self.mode = Mode::Terminal;
                                     return Some(MouseAction::FocusPane { ws_idx, pane_id });
                                 }
+                            }
+                        }
+                        if let Some(press) = tab_section_press {
+                            // A plain click on a Tabs-section row activates that tab
+                            // in its workspace (which may be a different space).
+                            if let Some((ws_idx, tab_idx)) = self.resolve_tab_ref(&press.entry) {
+                                self.mode = Mode::Terminal;
+                                return Some(MouseAction::FocusTabInWorkspace { ws_idx, tab_idx });
                             }
                         }
                     }
@@ -1080,42 +1165,10 @@ impl AppState {
             }
 
             MouseEventKind::ScrollUp if in_sidebar => {
-                let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
-                    && mouse.row >= agent_area.y
-                    && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
-                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
-                        self, agent_area,
-                    )) {
-                        self.scroll_agent_panel(-1);
-                    }
-                } else if crate::ui::should_show_scrollbar(
-                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
-                ) {
-                    self.scroll_workspace_list(-1);
-                } else {
-                    self.move_selected_workspace_by_visible_delta(-1);
-                }
+                self.scroll_sidebar_band(mouse.row, -1);
             }
             MouseEventKind::ScrollDown if in_sidebar => {
-                let agent_area = self.agent_panel_rect();
-                let over_agent_panel = agent_area != Rect::default()
-                    && mouse.row >= agent_area.y
-                    && mouse.row < agent_area.y + agent_area.height;
-                if over_agent_panel {
-                    if crate::ui::should_show_scrollbar(crate::ui::agent_panel_scroll_metrics(
-                        self, agent_area,
-                    )) {
-                        self.scroll_agent_panel(1);
-                    }
-                } else if crate::ui::should_show_scrollbar(
-                    crate::ui::workspace_list_scroll_metrics(self, self.workspace_list_rect()),
-                ) {
-                    self.scroll_workspace_list(1);
-                } else {
-                    self.move_selected_workspace_by_visible_delta(1);
-                }
+                self.scroll_sidebar_band(mouse.row, 1);
             }
 
             MouseEventKind::Moved if self.mode == Mode::ContextMenu => {
@@ -1617,6 +1670,9 @@ impl AppState {
                     source_id: drag_source_id,
                     ..
                 } | DragTarget::TabReorder {
+                    source_id: drag_source_id,
+                    ..
+                } | DragTarget::AgentReorder {
                     source_id: drag_source_id,
                     ..
                 } if drag_source_id == source_id

@@ -26,6 +26,21 @@ pub struct PaneDetail {
 }
 
 impl Tab {
+    /// True when this tab is an agent tab: it has at least one pane attached to
+    /// an agent terminal and no non-agent panes. A tab that mixes agent and
+    /// non-agent panes is not an agent tab. The agent's current state (idle,
+    /// working, or blocked) does not matter.
+    pub fn is_agent_tab(&self, terminals: &HashMap<TerminalId, TerminalState>) -> bool {
+        let mut saw_agent = false;
+        for pane in self.panes.values() {
+            match terminals.get(&pane.attached_terminal_id) {
+                Some(terminal) if terminal.is_agent_terminal() => saw_agent = true,
+                _ => return false,
+            }
+        }
+        saw_agent
+    }
+
     fn pane_details(
         &self,
         terminals: &HashMap<TerminalId, TerminalState>,
