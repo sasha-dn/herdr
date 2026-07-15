@@ -39,19 +39,88 @@ impl AppState {
         )
     }
 
-    /// Resolve a sidebar row to the Panes-section row it hits, returning the flat
-    /// order index plus the `(ws_idx, pane_id)` it points at.
+    /// Resolve a sidebar row to the Panes-section pane row it hits, returning the
+    /// flat order index plus the `(ws_idx, pane_id)` it points at. Line-split rows
+    /// resolve to `None` (they are not focusable panes).
     pub(super) fn pane_section_row_at(
         &self,
         row: u16,
     ) -> Option<(usize, usize, crate::layout::PaneId)> {
+        use crate::app::state::PaneSectionRowContent;
         self.view.pane_section_row_areas.iter().find_map(|area| {
-            (row >= area.rect.y && row < area.rect.y + area.rect.height).then_some((
-                area.order_idx,
-                area.ws_idx,
-                area.pane_id,
-            ))
+            if row < area.rect.y || row >= area.rect.y + area.rect.height {
+                return None;
+            }
+            match area.content {
+                PaneSectionRowContent::Pane {
+                    ws_idx, pane_id, ..
+                } => Some((area.order_idx, ws_idx, pane_id)),
+                PaneSectionRowContent::LineSplit { .. } => None,
+            }
         })
+    }
+
+    /// Manual-order entry (pane or line-split) under the given sidebar row, for
+    /// drag pickup. Mirrors [`AppState::agent_panel_entry_ref_at_row`].
+    pub(super) fn pane_section_entry_ref_at_row(
+        &self,
+        row: u16,
+    ) -> Option<crate::app::state::PaneManualEntryRef> {
+        use crate::app::state::{PaneManualEntryRef, PaneSectionRowContent};
+        for area in &self.view.pane_section_row_areas {
+            if row < area.rect.y || row >= area.rect.y + area.rect.height {
+                continue;
+            }
+            return match area.content {
+                PaneSectionRowContent::Pane {
+                    ws_idx, pane_id, ..
+                } => {
+                    let ws = self.workspaces.get(ws_idx)?;
+                    let pane_number = ws.public_pane_number(pane_id)?;
+                    Some(PaneManualEntryRef::Pane(
+                        crate::app::state::PaneSectionRef {
+                            workspace_id: ws.id.clone(),
+                            pane_number,
+                        },
+                    ))
+                }
+                PaneSectionRowContent::LineSplit { id } => Some(PaneManualEntryRef::LineSplit(id)),
+            };
+        }
+        None
+    }
+
+    /// Line-split id under the given sidebar row in the Panes section, if any (for
+    /// the right-click context menu). Mirrors `agent_panel_line_split_at_row`.
+    pub(super) fn pane_section_line_split_at_row(
+        &self,
+        row: u16,
+    ) -> Option<crate::app::state::LineSplitId> {
+        use crate::app::state::PaneSectionRowContent;
+        for area in &self.view.pane_section_row_areas {
+            if row < area.rect.y || row >= area.rect.y + area.rect.height {
+                continue;
+            }
+            return match area.content {
+                PaneSectionRowContent::LineSplit { id } => Some(id),
+                PaneSectionRowContent::Pane { .. } => None,
+            };
+        }
+        None
+    }
+
+    /// Whether the given cell hits the Panes-section "+ split" affordance.
+    pub(super) fn on_pane_section_split_button(&self, col: u16, row: u16) -> bool {
+        if self.sidebar_collapsed {
+            return false;
+        }
+        let area = self.pane_section_rect();
+        let rect = crate::ui::pane_section_split_button_rect(area);
+        rect.width > 0
+            && col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height
     }
 
     /// Resolve a stable [`crate::app::state::PaneSectionRef`] back to its live
@@ -72,22 +141,6 @@ impl AppState {
         Some((ws_idx, pane_id))
     }
 
-    /// Resolve a sidebar row to the stable [`crate::app::state::PaneSectionRef`]
-    /// of the Panes-section row it hits (used to pick up a pane for a reorder
-    /// drag).
-    pub(super) fn pane_section_ref_at_row(
-        &self,
-        row: u16,
-    ) -> Option<crate::app::state::PaneSectionRef> {
-        let (_, ws_idx, pane_id) = self.pane_section_row_at(row)?;
-        let ws = self.workspaces.get(ws_idx)?;
-        let pane_number = ws.public_pane_number(pane_id)?;
-        Some(crate::app::state::PaneSectionRef {
-            workspace_id: ws.id.clone(),
-            pane_number,
-        })
-    }
-
     /// Flat drop index for a Panes-section reorder at sidebar `row`, mirroring the
     /// agent-panel drop-index geometry (upper half inserts before, lower half
     /// after; the gap and area below the last row insert at the end).
@@ -103,7 +156,8 @@ impl AppState {
         if row < body.y || row >= body.y + body.height {
             return None;
         }
-        let num_entries = crate::ui::sidebar_pane_section_entries(self).len();
+        // Insert index is a slot in the flat order (panes + line-splits).
+        let num_entries = self.pane_section_order.order.len();
         let areas = &self.view.pane_section_row_areas;
         for area in areas {
             let slot_bottom = area.rect.y.saturating_add(area.rect.height);
@@ -665,10 +719,9 @@ impl AppState {
             return false;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            self.view.sidebar_rect,
-            self.sidebar_section_split,
-        );
+        // Use the actual agents band (three-band layout) so the hit area matches
+        // where the toggle is rendered, mirroring `on_agent_panel_split_button`.
+        let detail_area = self.agent_panel_rect();
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
         rect.width > 0
             && col >= rect.x
@@ -1072,11 +1125,9 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scroll = 3;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-            app.state.view.sidebar_rect,
-            app.state.sidebar_section_split,
-        );
+        let detail_area = app.state.agent_panel_rect();
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2060,10 +2111,8 @@ mod tests {
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
 
         let click_toggle = |app: &mut App| {
-            let (_, detail_area) = crate::ui::expanded_sidebar_sections(
-                app.state.view.sidebar_rect,
-                app.state.sidebar_section_split,
-            );
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+            let detail_area = app.state.agent_panel_rect();
             let rect = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
@@ -2119,13 +2168,23 @@ mod tests {
         );
     }
 
+    /// Pane id carried by a Panes-section row area, panicking on a line-split row.
+    fn pane_area_pane_id(area: &crate::app::state::PaneSectionRowArea) -> crate::layout::PaneId {
+        match area.content {
+            crate::app::state::PaneSectionRowContent::Pane { pane_id, .. } => pane_id,
+            crate::app::state::PaneSectionRowContent::LineSplit { .. } => {
+                panic!("expected a pane row, found a line-split")
+            }
+        }
+    }
+
     #[test]
     fn pane_row_double_click_opens_pane_rename() {
         let mut app = app_with_two_tab_rows();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
         let area = app.state.view.pane_section_row_areas[0];
         let row = area.rect.y;
-        let pane_id = area.pane_id;
+        let pane_id = pane_area_pane_id(&area);
         let col = 2;
 
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), col, row));
@@ -2137,6 +2196,150 @@ mod tests {
         assert_eq!(app.state.mode, Mode::RenamePane);
         assert_eq!(app.state.rename_pane_target, Some(pane_id));
         assert!(app.last_pane_section_row_click.is_none());
+    }
+
+    #[test]
+    fn pane_section_split_button_click_creates_and_renames_split() {
+        use crate::app::state::{LineSplitSection, PaneManualEntry};
+        let mut app = app_with_two_tab_rows();
+        app.state.mouse_capture = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+
+        let pane_area = app.state.pane_section_rect();
+        let rect = crate::ui::pane_section_split_button_rect(pane_area);
+        assert_ne!(rect, Rect::default());
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            rect.y,
+        ));
+
+        // A new empty line-split is inserted at the top and rename opens for it.
+        assert!(matches!(
+            app.state.pane_section_order.order.first(),
+            Some(PaneManualEntry::LineSplit { name, .. }) if name.is_empty()
+        ));
+        assert_eq!(app.state.mode, Mode::RenameLineSplit);
+        assert!(matches!(
+            app.state.rename_line_split_target,
+            Some((LineSplitSection::Panes, _))
+        ));
+    }
+
+    #[test]
+    fn pane_section_entry_ref_at_row_picks_up_split() {
+        use crate::app::state::{PaneManualEntryRef, PaneSectionRowContent};
+        let mut app = app_with_two_tab_rows();
+        let split = app
+            .state
+            .pane_section_order
+            .new_line_split("scheduled".to_string(), 0);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+
+        let split_row = app
+            .state
+            .view
+            .pane_section_row_areas
+            .iter()
+            .find(|area| matches!(area.content, PaneSectionRowContent::LineSplit { .. }))
+            .expect("split row present");
+        assert_eq!(
+            app.state.pane_section_entry_ref_at_row(split_row.rect.y),
+            Some(PaneManualEntryRef::LineSplit(split))
+        );
+        // A left-click on a split row is a focus no-op (no pane resolved).
+        assert!(app.state.pane_section_row_at(split_row.rect.y).is_none());
+    }
+
+    #[test]
+    fn pane_section_line_split_right_click_opens_menu() {
+        use crate::app::state::{ContextMenuKind, LineSplitSection, PaneSectionRowContent};
+        let mut app = app_with_two_tab_rows();
+        let split = app
+            .state
+            .pane_section_order
+            .new_line_split("scheduled".to_string(), 0);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+
+        let split_row = app
+            .state
+            .view
+            .pane_section_row_areas
+            .iter()
+            .find(|area| matches!(area.content, PaneSectionRowContent::LineSplit { .. }))
+            .expect("split row present")
+            .rect
+            .y;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            2,
+            split_row,
+        ));
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+        assert!(matches!(
+            app.state.context_menu.as_ref().map(|menu| &menu.kind),
+            Some(ContextMenuKind::LineSplit {
+                section: LineSplitSection::Panes,
+                id,
+            }) if *id == split
+        ));
+    }
+
+    #[test]
+    fn pane_section_drag_reorders_line_split() {
+        use crate::app::state::{PaneManualEntry, PaneManualEntryRef, PaneSectionRowContent};
+        // A single non-agent pane plus a split at the top, so both rows fit and
+        // the end of the order is reachable by mouse.
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let split = app
+            .state
+            .pane_section_order
+            .new_line_split("scheduled".to_string(), 0);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+
+        let areas = app.state.view.pane_section_row_areas.clone();
+        assert_eq!(areas.len(), 2, "split and pane both visible");
+        let split_row = areas
+            .iter()
+            .find(|area| matches!(area.content, PaneSectionRowContent::LineSplit { .. }))
+            .expect("split row present")
+            .rect
+            .y;
+        let pane_area = areas
+            .iter()
+            .find(|area| matches!(area.content, PaneSectionRowContent::Pane { .. }))
+            .expect("pane row present")
+            .rect;
+        // Lower half of the pane row inserts after it (end of the order).
+        let target_row = pane_area.y + pane_area.height - 1;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 2, split_row));
+        assert!(app.state.pane_section_press.is_some());
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            2,
+            target_row,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PaneSectionReorder {
+                source: PaneManualEntryRef::LineSplit(id),
+                insert_idx: Some(_),
+            }) if *id == split
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 2, target_row));
+
+        // The split now sits at the end of the order (below the pane).
+        assert!(matches!(
+            app.state.pane_section_order.order.last(),
+            Some(PaneManualEntry::LineSplit { id, .. }) if *id == split
+        ));
+        app.state.assert_invariants_for_test();
     }
 
     fn app_with_many_tab_rows(n: usize) -> App {
@@ -2178,7 +2381,7 @@ mod tests {
         let top_area = app.state.view.pane_section_row_areas[0];
         assert_eq!(
             app.state.pane_section_row_at(top_area.rect.y),
-            Some((0, 0, top_area.pane_id))
+            Some((0, 0, pane_area_pane_id(&top_area)))
         );
 
         // After scrolling down, the same screen row maps to a later pane, and the
@@ -2189,7 +2392,7 @@ mod tests {
         assert_eq!(top.order_idx, 2);
         assert_eq!(
             app.state.pane_section_row_at(top.rect.y),
-            Some((2, 0, top.pane_id))
+            Some((2, 0, pane_area_pane_id(&top)))
         );
         assert_eq!(
             app.state.pane_section_drop_index_at_row(top.rect.y),

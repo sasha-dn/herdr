@@ -425,47 +425,96 @@ pub(super) fn open_rename_agent(
     state.mode = Mode::RenameAgent;
 }
 
-pub(super) fn open_rename_line_split(state: &mut AppState, id: crate::app::state::LineSplitId) {
-    let Some(name) = state
-        .agent_manual_order
-        .order
-        .iter()
-        .find_map(|entry| match entry {
-            crate::app::state::ManualEntry::LineSplit { id: entry_id, name } if *entry_id == id => {
-                Some(name.clone())
-            }
-            _ => None,
-        })
-    else {
+/// Current name of a line-split in the given section, if it exists.
+fn line_split_current_name(
+    state: &AppState,
+    section: crate::app::state::LineSplitSection,
+    id: crate::app::state::LineSplitId,
+) -> Option<String> {
+    use crate::app::state::{LineSplitSection, ManualEntry, PaneManualEntry};
+    match section {
+        LineSplitSection::Agents => {
+            state
+                .agent_manual_order
+                .order
+                .iter()
+                .find_map(|entry| match entry {
+                    ManualEntry::LineSplit { id: entry_id, name } if *entry_id == id => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+        }
+        LineSplitSection::Panes => {
+            state
+                .pane_section_order
+                .order
+                .iter()
+                .find_map(|entry| match entry {
+                    PaneManualEntry::LineSplit { id: entry_id, name } if *entry_id == id => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+        }
+    }
+}
+
+pub(super) fn open_rename_line_split(
+    state: &mut AppState,
+    section: crate::app::state::LineSplitSection,
+    id: crate::app::state::LineSplitId,
+) {
+    let Some(name) = line_split_current_name(state, section, id) else {
         return;
     };
     state.creating_new_tab = false;
     state.requested_new_tab_name = None;
     state.rename_pane_target = None;
     state.rename_tab_target = None;
-    state.rename_line_split_target = Some(id);
+    state.rename_line_split_target = Some((section, id));
     state.set_name_input(name);
     state.name_input_replace_on_type = true;
     state.mode = Mode::RenameLineSplit;
 }
 
 /// Write `name` into the line-split identified by `rename_line_split_target`.
-/// Client-only presentation state, so this mutates the manual order directly and
+/// Client-only presentation state, so this mutates the owning order directly and
 /// marks the session dirty rather than dispatching a server API request.
 fn commit_line_split_rename(state: &mut AppState, name: String) {
-    let Some(id) = state.rename_line_split_target else {
+    use crate::app::state::{LineSplitSection, ManualEntry, PaneManualEntry};
+    let Some((section, id)) = state.rename_line_split_target else {
         return;
     };
-    for entry in &mut state.agent_manual_order.order {
-        if let crate::app::state::ManualEntry::LineSplit {
-            id: entry_id,
-            name: entry_name,
-        } = entry
-        {
-            if *entry_id == id {
-                *entry_name = name;
-                state.mark_session_dirty();
-                return;
+    match section {
+        LineSplitSection::Agents => {
+            for entry in &mut state.agent_manual_order.order {
+                if let ManualEntry::LineSplit {
+                    id: entry_id,
+                    name: entry_name,
+                } = entry
+                {
+                    if *entry_id == id {
+                        *entry_name = name;
+                        state.mark_session_dirty();
+                        return;
+                    }
+                }
+            }
+        }
+        LineSplitSection::Panes => {
+            for entry in &mut state.pane_section_order.order {
+                if let PaneManualEntry::LineSplit {
+                    id: entry_id,
+                    name: entry_name,
+                } = entry
+                {
+                    if *entry_id == id {
+                        *entry_name = name;
+                        state.mark_session_dirty();
+                        return;
+                    }
+                }
             }
         }
     }
@@ -1130,24 +1179,41 @@ pub(super) fn apply_context_menu_action(
                 };
             }
         }
-        (ContextMenuKind::LineSplit { id }, Some("Rename")) => {
-            open_rename_line_split(state, id);
+        (ContextMenuKind::LineSplit { section, id }, Some("Rename")) => {
+            open_rename_line_split(state, section, id);
         }
-        (ContextMenuKind::LineSplit { id }, Some("Delete")) => {
-            delete_line_split(state, id);
+        (ContextMenuKind::LineSplit { section, id }, Some("Delete")) => {
+            delete_line_split(state, section, id);
             leave_modal(state);
         }
         _ => leave_modal(state),
     }
 }
 
-/// Remove the line-split with `id` from the manual order (client-only).
-fn delete_line_split(state: &mut AppState, id: crate::app::state::LineSplitId) {
-    let before = state.agent_manual_order.order.len();
-    state.agent_manual_order.order.retain(|entry| {
-        !matches!(entry, crate::app::state::ManualEntry::LineSplit { id: entry_id, .. } if *entry_id == id)
-    });
-    if state.agent_manual_order.order.len() != before {
+/// Remove the line-split with `id` from the owning section's order (client-only).
+fn delete_line_split(
+    state: &mut AppState,
+    section: crate::app::state::LineSplitSection,
+    id: crate::app::state::LineSplitId,
+) {
+    use crate::app::state::{LineSplitSection, ManualEntry, PaneManualEntry};
+    let changed = match section {
+        LineSplitSection::Agents => {
+            let before = state.agent_manual_order.order.len();
+            state.agent_manual_order.order.retain(|entry| {
+                !matches!(entry, ManualEntry::LineSplit { id: entry_id, .. } if *entry_id == id)
+            });
+            state.agent_manual_order.order.len() != before
+        }
+        LineSplitSection::Panes => {
+            let before = state.pane_section_order.order.len();
+            state.pane_section_order.order.retain(|entry| {
+                !matches!(entry, PaneManualEntry::LineSplit { id: entry_id, .. } if *entry_id == id)
+            });
+            state.pane_section_order.order.len() != before
+        }
+    };
+    if changed {
         state.mark_session_dirty();
     }
 }
@@ -1571,11 +1637,11 @@ impl App {
                     Mode::Navigate
                 };
             }
-            (ContextMenuKind::LineSplit { id }, Some("Rename")) => {
-                open_rename_line_split(&mut self.state, id);
+            (ContextMenuKind::LineSplit { section, id }, Some("Rename")) => {
+                open_rename_line_split(&mut self.state, section, id);
             }
-            (ContextMenuKind::LineSplit { id }, Some("Delete")) => {
-                delete_line_split(&mut self.state, id);
+            (ContextMenuKind::LineSplit { section, id }, Some("Delete")) => {
+                delete_line_split(&mut self.state, section, id);
                 leave_modal(&mut self.state);
             }
             _ => leave_modal(&mut self.state),
@@ -2160,11 +2226,15 @@ mod tests {
 
     #[test]
     fn open_rename_line_split_prefills_current_name() {
+        use crate::app::state::LineSplitSection;
         let (mut state, id) = manual_state_with_line_split("scheduled");
-        open_rename_line_split(&mut state, id);
+        open_rename_line_split(&mut state, LineSplitSection::Agents, id);
 
         assert_eq!(state.mode, Mode::RenameLineSplit);
-        assert_eq!(state.rename_line_split_target, Some(id));
+        assert_eq!(
+            state.rename_line_split_target,
+            Some((LineSplitSection::Agents, id))
+        );
         assert_eq!(state.name_input, "scheduled");
         assert!(state.name_input_replace_on_type);
         // Line-split rename uses the shared caret infrastructure: the caret lands
@@ -2184,8 +2254,9 @@ mod tests {
 
     #[test]
     fn apply_rename_action_writes_line_split_name_and_allows_empty() {
+        use crate::app::state::LineSplitSection;
         let (mut state, id) = manual_state_with_line_split("scheduled");
-        open_rename_line_split(&mut state, id);
+        open_rename_line_split(&mut state, LineSplitSection::Agents, id);
         state.name_input = "later".to_string();
         state.name_input_replace_on_type = false;
         apply_rename_action(&mut state, ModalAction::Save);
@@ -2195,7 +2266,7 @@ mod tests {
         assert_eq!(state.mode, Mode::Terminal);
 
         // Committing an empty name is allowed (renders as a plain rule).
-        open_rename_line_split(&mut state, id);
+        open_rename_line_split(&mut state, LineSplitSection::Agents, id);
         state.name_input.clear();
         state.name_input_replace_on_type = false;
         apply_rename_action(&mut state, ModalAction::Save);
@@ -2208,7 +2279,10 @@ mod tests {
         let (mut state, id) = manual_state_with_line_split("scheduled");
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let menu = ContextMenuState {
-            kind: ContextMenuKind::LineSplit { id },
+            kind: ContextMenuKind::LineSplit {
+                section: crate::app::state::LineSplitSection::Agents,
+                id,
+            },
             x: 0,
             y: 0,
             list: MenuListState::new(0),
@@ -2223,10 +2297,14 @@ mod tests {
 
     #[test]
     fn context_menu_rename_opens_line_split_rename() {
+        use crate::app::state::LineSplitSection;
         let (mut state, id) = manual_state_with_line_split("scheduled");
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
         let menu = ContextMenuState {
-            kind: ContextMenuKind::LineSplit { id },
+            kind: ContextMenuKind::LineSplit {
+                section: LineSplitSection::Agents,
+                id,
+            },
             x: 0,
             y: 0,
             list: MenuListState::new(0),
@@ -2234,7 +2312,46 @@ mod tests {
         apply_context_menu_action(&mut state, &mut terminal_runtimes, menu, 0);
 
         assert_eq!(state.mode, Mode::RenameLineSplit);
-        assert_eq!(state.rename_line_split_target, Some(id));
+        assert_eq!(
+            state.rename_line_split_target,
+            Some((LineSplitSection::Agents, id))
+        );
+    }
+
+    #[test]
+    fn pane_and_agent_line_splits_with_colliding_ids_stay_independent() {
+        use crate::app::state::{LineSplitSection, ManualEntry, PaneManualEntry};
+        let mut state = state_with_workspaces(&["one"]);
+        state.ensure_test_terminals();
+        state.mode = Mode::Terminal;
+        // Both sections mint id 0 (independent counters).
+        let agent_id = state
+            .agent_manual_order
+            .new_line_split("agents".to_string(), 0);
+        let pane_id = state
+            .pane_section_order
+            .new_line_split("panes".to_string(), 0);
+        assert_eq!(agent_id, pane_id);
+
+        // Renaming the Panes split leaves the agents split untouched.
+        open_rename_line_split(&mut state, LineSplitSection::Panes, pane_id);
+        state.name_input = "panes-renamed".to_string();
+        state.name_input_replace_on_type = false;
+        apply_rename_action(&mut state, ModalAction::Save);
+        assert!(state.agent_manual_order.order.iter().any(|entry| matches!(
+            entry,
+            ManualEntry::LineSplit { name, .. } if name == "agents"
+        )));
+        assert!(state.pane_section_order.order.iter().any(|entry| matches!(
+            entry,
+            PaneManualEntry::LineSplit { name, .. } if name == "panes-renamed"
+        )));
+
+        // Deleting the Panes split leaves the agents split in place.
+        delete_line_split(&mut state, LineSplitSection::Panes, pane_id);
+        assert!(state.pane_section_order.order.is_empty());
+        assert_eq!(state.agent_manual_order.order.len(), 1);
+        state.assert_invariants_for_test();
     }
 
     #[test]

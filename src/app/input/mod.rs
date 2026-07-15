@@ -789,7 +789,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.collapsed_space_keys.clone(),
         state.collapsed_agent_keys.clone(),
         state.agent_manual_order.to_public_keys(&state.workspaces),
-        state.pane_section_order.to_refs(),
+        state.pane_section_order.to_entry_keys(),
     )
 }
 

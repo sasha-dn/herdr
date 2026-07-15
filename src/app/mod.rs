@@ -293,15 +293,27 @@ fn restore_pane_section_order(
     let Some(order) = snap.pane_section_order.as_ref() else {
         return state::PaneSectionOrder::default();
     };
-    let refs: Vec<state::PaneSectionRef> = order
+    let keys: Vec<state::PaneManualEntryKey> = order
         .entries
         .iter()
-        .map(|entry| state::PaneSectionRef {
-            workspace_id: entry.workspace_id.clone(),
-            pane_number: entry.pane_number,
+        .map(|entry| match entry {
+            crate::persist::PaneSectionEntrySnapshot::Pane {
+                workspace_id,
+                pane_number,
+            } => state::PaneManualEntryKey::Pane {
+                workspace_id: workspace_id.clone(),
+                pane_number: *pane_number,
+            },
+            crate::persist::PaneSectionEntrySnapshot::LineSplit {
+                line_split_id,
+                name,
+            } => state::PaneManualEntryKey::LineSplit {
+                id: *line_split_id,
+                name: name.clone(),
+            },
         })
         .collect();
-    state::PaneSectionOrder::from_refs(refs, workspaces)
+    state::PaneSectionOrder::from_entry_keys(&keys, workspaces)
 }
 
 fn agent_panel_sort_from_config(

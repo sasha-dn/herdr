@@ -9,7 +9,9 @@ use ratatui::{
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, LineSplitId, ManualEntry, Palette};
+use crate::app::state::{
+    AgentPanelSort, LineSplitId, ManualEntry, Palette, PaneManualEntry as ManualPaneEntry,
+};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -355,9 +357,41 @@ pub(crate) struct PaneSectionEntry {
     pub pane_id: crate::layout::PaneId,
 }
 
-/// All non-agent panes across every workspace, ordered by the client-only Panes
-/// section ordering. Entries whose pane no longer resolves are skipped.
-pub(crate) fn sidebar_pane_section_entries(app: &AppState) -> Vec<PaneSectionEntry> {
+/// A single visible row in the Panes section: either a non-agent pane entry or a
+/// named line-split divider. Mirrors [`AgentPanelRow`]. Client-only presentation
+/// state.
+pub(crate) enum PaneSectionRow {
+    Pane(PaneSectionEntry),
+    LineSplit {
+        order_idx: usize,
+        id: LineSplitId,
+        name: String,
+    },
+}
+
+impl PaneSectionRow {
+    /// Content-row height of this row (excluding the trailing gap). Pane rows
+    /// render two lines; line-splits are a single rule.
+    fn content_height(&self) -> u16 {
+        match self {
+            PaneSectionRow::Pane(_) => PANE_SECTION_ROW_HEIGHT,
+            PaneSectionRow::LineSplit { .. } => 1,
+        }
+    }
+
+    /// Flat index of this row into `PaneSectionOrder::order`.
+    fn order_idx(&self) -> usize {
+        match self {
+            PaneSectionRow::Pane(entry) => entry.order_idx,
+            PaneSectionRow::LineSplit { order_idx, .. } => *order_idx,
+        }
+    }
+}
+
+/// Full ordered list of visible Panes-section rows, walking the client-only
+/// order and interleaving panes and line-splits. Pane entries whose pane no
+/// longer resolves are skipped; line-splits are always kept.
+pub(crate) fn sidebar_pane_section_rows(app: &AppState) -> Vec<PaneSectionRow> {
     let mut lookup: std::collections::HashMap<
         (&str, usize),
         (usize, usize, crate::layout::PaneId),
@@ -371,45 +405,84 @@ pub(crate) fn sidebar_pane_section_entries(app: &AppState) -> Vec<PaneSectionEnt
         .order
         .iter()
         .enumerate()
-        .filter_map(|(order_idx, pane_ref)| {
-            lookup
+        .filter_map(|(order_idx, entry)| match entry {
+            ManualPaneEntry::Pane(pane_ref) => lookup
                 .get(&(pane_ref.workspace_id.as_str(), pane_ref.pane_number))
-                .map(|&(ws_idx, tab_idx, pane_id)| PaneSectionEntry {
-                    order_idx,
-                    ws_idx,
-                    tab_idx,
-                    pane_id,
-                })
+                .map(|&(ws_idx, tab_idx, pane_id)| {
+                    PaneSectionRow::Pane(PaneSectionEntry {
+                        order_idx,
+                        ws_idx,
+                        tab_idx,
+                        pane_id,
+                    })
+                }),
+            ManualPaneEntry::LineSplit { id, name } => Some(PaneSectionRow::LineSplit {
+                order_idx,
+                id: *id,
+                name: name.clone(),
+            }),
         })
         .collect()
 }
 
-/// Visible-row layout for the Panes section, walking entries from `scroll` and
-/// laying out two-line rows (with a one-row gap) inside `body`. Pure; does not
-/// consult scroll metrics, so it is safe to call from the metrics path.
+/// All non-agent panes across every workspace, ordered by the client-only Panes
+/// section ordering. Line-splits are excluded, so this is the pane-only view used
+/// for focus/enumeration (keyboard navigation and scroll targeting skip splits).
+pub(crate) fn sidebar_pane_section_entries(app: &AppState) -> Vec<PaneSectionEntry> {
+    sidebar_pane_section_rows(app)
+        .into_iter()
+        .filter_map(|row| match row {
+            PaneSectionRow::Pane(entry) => Some(entry),
+            PaneSectionRow::LineSplit { .. } => None,
+        })
+        .collect()
+}
+
+/// Row index (in the full [`sidebar_pane_section_rows`] list) of the pane row for
+/// `pane_id`, if present. Mirrors [`agent_panel_row_index_of_pane`].
+pub(crate) fn pane_section_row_index_of_pane(
+    app: &AppState,
+    pane_id: crate::layout::PaneId,
+) -> Option<usize> {
+    sidebar_pane_section_rows(app)
+        .iter()
+        .position(|row| matches!(row, PaneSectionRow::Pane(entry) if entry.pane_id == pane_id))
+}
+
+/// Visible-row layout for the Panes section, walking rows from `scroll` and
+/// laying out variable-height rows (with a one-row gap) inside `body`. Pure; does
+/// not consult scroll metrics, so it is safe to call from the metrics path.
 fn pane_section_row_areas_in(
     app: &AppState,
     body: Rect,
     scroll: usize,
 ) -> Vec<crate::app::state::PaneSectionRowArea> {
+    use crate::app::state::PaneSectionRowContent;
     let mut areas = Vec::new();
     if body.width == 0 || body.height == 0 {
         return areas;
     }
     let body_bottom = body.y + body.height;
     let mut row_y = body.y;
-    for entry in sidebar_pane_section_entries(app).into_iter().skip(scroll) {
-        if row_y.saturating_add(PANE_SECTION_ROW_HEIGHT) > body_bottom {
+    for row in sidebar_pane_section_rows(app).into_iter().skip(scroll) {
+        let height = row.content_height();
+        if row_y.saturating_add(height) > body_bottom {
             break;
         }
+        let content = match &row {
+            PaneSectionRow::Pane(entry) => PaneSectionRowContent::Pane {
+                ws_idx: entry.ws_idx,
+                tab_idx: entry.tab_idx,
+                pane_id: entry.pane_id,
+            },
+            PaneSectionRow::LineSplit { id, .. } => PaneSectionRowContent::LineSplit { id: *id },
+        };
         areas.push(crate::app::state::PaneSectionRowArea {
-            ws_idx: entry.ws_idx,
-            tab_idx: entry.tab_idx,
-            pane_id: entry.pane_id,
-            order_idx: entry.order_idx,
-            rect: Rect::new(body.x, row_y, body.width, PANE_SECTION_ROW_HEIGHT),
+            order_idx: row.order_idx(),
+            content,
+            rect: Rect::new(body.x, row_y, body.width, height),
         });
-        row_y = row_y.saturating_add(PANE_SECTION_ROW_HEIGHT);
+        row_y = row_y.saturating_add(height);
         if row_y < body_bottom {
             row_y = row_y.saturating_add(1);
         }
@@ -426,7 +499,7 @@ pub(crate) fn pane_section_scroll_metrics(
     app: &AppState,
     area: Rect,
 ) -> crate::pane::ScrollMetrics {
-    let total_rows = sidebar_pane_section_entries(app).len();
+    let total_rows = sidebar_pane_section_rows(app).len();
     let scroll = app.pane_section_scroll.min(total_rows.saturating_sub(1));
     let viewport_rows = pane_section_visible_count(app, area, scroll);
     let max_offset_from_bottom = total_rows.saturating_sub(viewport_rows);
@@ -489,6 +562,23 @@ pub(crate) fn pane_section_drop_indicator_row(
         }
     }
     None
+}
+
+const PANE_SECTION_SPLIT_LABEL: &str = "+ split";
+
+/// Mouse-first "+ split" affordance rect for the Panes section, right-aligned on
+/// the "panes" header title row (mirrors the agents-panel affordance). Returns
+/// the empty rect when there is no room.
+pub(crate) fn pane_section_split_button_rect(area: Rect) -> Rect {
+    if area.width == 0 || area.height < 2 {
+        return Rect::default();
+    }
+    let width = display_width_u16(PANE_SECTION_SPLIT_LABEL);
+    if width == 0 || width >= area.width {
+        return Rect::default();
+    }
+    let x = area.x + area.width.saturating_sub(width);
+    Rect::new(x, area.y + 1, width, 1)
 }
 
 fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
@@ -1616,14 +1706,16 @@ fn pane_section_row_name(
 }
 
 /// Render the Panes section: every non-agent pane across all spaces as a
-/// two-line row (pane name over its space name), ordered by the client-only
-/// Panes-section order, with a drop indicator during a reorder drag.
+/// two-line row (pane name over its space name) interleaved with named
+/// line-split dividers, ordered by the client-only Panes-section order, with a
+/// drop indicator during a reorder drag.
 fn render_pane_section(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     area: Rect,
 ) {
+    use crate::app::state::{PaneManualEntryRef, PaneSectionRowContent};
     let p = &app.palette;
     if area.height < 3 {
         return;
@@ -1641,6 +1733,18 @@ fn render_pane_section(
         )])),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
+    if app.mouse_capture {
+        let split_rect = pane_section_split_button_rect(area);
+        if split_rect != Rect::default() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    PANE_SECTION_SPLIT_LABEL,
+                    Style::default().fg(p.overlay0),
+                )),
+                split_rect,
+            );
+        }
+    }
 
     let metrics = pane_section_scroll_metrics(app, area);
     let scrollbar_rect = pane_section_scrollbar_rect(app, area);
@@ -1656,56 +1760,92 @@ fn render_pane_section(
         _ => None,
     };
 
+    // Line-split names live in the flat order; index them by order slot so the
+    // (name-less, Copy) row areas can render their label.
+    let split_names: std::collections::HashMap<usize, String> = sidebar_pane_section_rows(app)
+        .into_iter()
+        .filter_map(|row| match row {
+            PaneSectionRow::LineSplit {
+                order_idx, name, ..
+            } => Some((order_idx, name)),
+            PaneSectionRow::Pane(_) => None,
+        })
+        .collect();
+
     let areas = &app.view.pane_section_row_areas;
     let max_width = body.width as usize;
     for row in areas {
-        let ws = &app.workspaces[row.ws_idx];
-        let is_active = Some(row.ws_idx) == app.active
-            && ws.active_tab == row.tab_idx
-            && ws.focused_pane_id() == Some(row.pane_id);
-        let is_dragged = dragged.as_ref().is_some_and(|source| {
-            source.workspace_id == ws.id
-                && ws.public_pane_number(row.pane_id) == Some(source.pane_number)
-        });
+        match row.content {
+            PaneSectionRowContent::Pane {
+                ws_idx,
+                tab_idx,
+                pane_id,
+            } => {
+                let ws = &app.workspaces[ws_idx];
+                let is_active = Some(ws_idx) == app.active
+                    && ws.active_tab == tab_idx
+                    && ws.focused_pane_id() == Some(pane_id);
+                let is_dragged = matches!(
+                    &dragged,
+                    Some(PaneManualEntryRef::Pane(source))
+                        if source.workspace_id == ws.id
+                            && ws.public_pane_number(pane_id) == Some(source.pane_number)
+                );
 
-        if is_active || is_dragged {
-            let bg = if is_dragged {
-                p.surface1
-            } else {
-                p.surface_dim
-            };
-            let buf = frame.buffer_mut();
-            for y in row.rect.y..row.rect.y + row.rect.height {
-                for x in row.rect.x..row.rect.x + row.rect.width {
-                    buf[(x, y)].set_style(Style::default().bg(bg));
+                if is_active || is_dragged {
+                    let bg = if is_dragged {
+                        p.surface1
+                    } else {
+                        p.surface_dim
+                    };
+                    let buf = frame.buffer_mut();
+                    for y in row.rect.y..row.rect.y + row.rect.height {
+                        for x in row.rect.x..row.rect.x + row.rect.width {
+                            buf[(x, y)].set_style(Style::default().bg(bg));
+                        }
+                    }
                 }
+
+                let name_style = if is_active || is_dragged {
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.text)
+                };
+                let pane_name = pane_section_row_name(app, ws, pane_id, tab_idx);
+                let space_name = ws.display_name_from(&app.terminals, terminal_runtimes);
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(
+                        format!(" {}", truncate_end(&pane_name, max_width.saturating_sub(1))),
+                        name_style,
+                    )])),
+                    Rect::new(body.x, row.rect.y, body.width, 1),
+                );
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![Span::styled(
+                        format!(
+                            " {}",
+                            truncate_end(&space_name, max_width.saturating_sub(1))
+                        ),
+                        Style::default().fg(p.overlay0),
+                    )])),
+                    Rect::new(body.x, row.rect.y + 1, body.width, 1),
+                );
+            }
+            PaneSectionRowContent::LineSplit { id } => {
+                let is_dragged = matches!(&dragged, Some(PaneManualEntryRef::LineSplit(source)) if *source == id);
+                if is_dragged {
+                    let buf = frame.buffer_mut();
+                    for x in row.rect.x..row.rect.x + row.rect.width {
+                        buf[(x, row.rect.y)].set_style(Style::default().bg(p.surface1));
+                    }
+                }
+                let name = split_names
+                    .get(&row.order_idx)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                render_line_split_row(frame, body, row.rect.y, name, p);
             }
         }
-
-        let name_style = if is_active || is_dragged {
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(p.text)
-        };
-        let pane_name = pane_section_row_name(app, ws, row.pane_id, row.tab_idx);
-        let space_name = ws.display_name_from(&app.terminals, terminal_runtimes);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                format!(" {}", truncate_end(&pane_name, max_width.saturating_sub(1))),
-                name_style,
-            )])),
-            Rect::new(body.x, row.rect.y, body.width, 1),
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![Span::styled(
-                format!(
-                    " {}",
-                    truncate_end(&space_name, max_width.saturating_sub(1))
-                ),
-                Style::default().fg(p.overlay0),
-            )])),
-            Rect::new(body.x, row.rect.y + 1, body.width, 1),
-        );
     }
 
     if let Some(insert_idx) = match app.drag.as_ref().map(|drag| &drag.target) {
@@ -2613,6 +2753,119 @@ mod tests {
             .collect();
         // Plain (0) and mixed (2) tabs appear; the pure-agent tab (1) does not.
         assert_eq!(entries, vec![0, 2]);
+    }
+
+    /// One workspace with two non-agent panes (two tabs), reconciled into the
+    /// Panes section.
+    fn pane_section_app_with_two_panes() -> AppState {
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("logs"));
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = crate::app::Mode::Terminal;
+        app.reconcile_pane_section_order();
+        app
+    }
+
+    #[test]
+    fn pane_section_rows_interleave_line_split_between_panes() {
+        let mut app = pane_section_app_with_two_panes();
+        // Insert a line-split between the two panes (flat index 1).
+        let id = app
+            .pane_section_order
+            .new_line_split("scheduled".to_string(), 1);
+
+        let rows = sidebar_pane_section_rows(&app);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(rows[0], PaneSectionRow::Pane(_)));
+        assert!(matches!(
+            &rows[1],
+            PaneSectionRow::LineSplit { id: row_id, name, .. } if *row_id == id && name == "scheduled"
+        ));
+        assert!(matches!(rows[2], PaneSectionRow::Pane(_)));
+    }
+
+    #[test]
+    fn pane_section_row_areas_use_variable_heights_for_splits() {
+        use crate::app::state::PaneSectionRowContent;
+        let mut app = pane_section_app_with_two_panes();
+        // Split first, then a pane below it.
+        app.pane_section_order
+            .new_line_split("scheduled".to_string(), 0);
+
+        let body = Rect::new(0, 0, 20, 12);
+        let areas = pane_section_row_areas_in(&app, body, 0);
+        assert_eq!(areas.len(), 3);
+        // Row 0 is the split: single line.
+        assert!(matches!(
+            areas[0].content,
+            PaneSectionRowContent::LineSplit { .. }
+        ));
+        assert_eq!(areas[0].rect.height, 1);
+        // Row 1 is a pane: two lines, placed after the split plus a one-row gap.
+        assert!(matches!(
+            areas[1].content,
+            PaneSectionRowContent::Pane { .. }
+        ));
+        assert_eq!(areas[1].rect.height, 2);
+        assert_eq!(areas[1].rect.y, areas[0].rect.y + 1 + 1);
+    }
+
+    fn render_pane_section_to_backend(app: &mut AppState) -> String {
+        let area = Rect::new(0, 0, 106, 30);
+        crate::ui::compute_view(app, area);
+        let pane_area = pane_section_rect(
+            app.view.sidebar_rect,
+            app.sidebar_section_split,
+            app.sidebar_pane_section_split,
+            sidebar_shows_pane_section(app),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("test terminal should initialize");
+        let runtimes = TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_pane_section(app, &runtimes, frame, pane_area))
+            .expect("pane section should render");
+        let buffer = terminal.backend().buffer().clone();
+        let mut lines = Vec::new();
+        for y in 0..area.height {
+            let mut line = String::new();
+            for x in 0..area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    #[test]
+    fn pane_section_named_line_split_renders_rule_with_name() {
+        let mut app = pane_section_app_with_two_panes();
+        app.pane_section_order
+            .new_line_split("scheduled".to_string(), 0);
+        let rendered = render_pane_section_to_backend(&mut app);
+        let split_line = rendered
+            .lines()
+            .find(|line| line.contains("scheduled"))
+            .expect("named line-split row present");
+        assert!(
+            split_line.contains("─"),
+            "line-split should be drawn as a rule: {split_line:?}"
+        );
+    }
+
+    #[test]
+    fn pane_section_split_button_sits_on_header_when_mouse_capture() {
+        let area = Rect::new(0, 20, 26, 10);
+        let rect = pane_section_split_button_rect(area);
+        assert_ne!(rect, Rect::default());
+        // Right-aligned on the title row (area.y + 1).
+        assert_eq!(rect.y, area.y + 1);
+        assert_eq!(rect.x + rect.width, area.x + area.width);
+        assert_eq!(rect.width, display_width_u16(PANE_SECTION_SPLIT_LABEL));
     }
 
     #[test]

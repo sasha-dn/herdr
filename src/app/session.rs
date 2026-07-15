@@ -29,7 +29,7 @@ impl App {
                 .state
                 .agent_manual_order
                 .to_public_keys(&self.state.workspaces);
-            let pane_section_order_refs = self.state.pane_section_order.to_refs();
+            let pane_section_order_keys = self.state.pane_section_order.to_entry_keys();
             let snap = crate::persist::capture(
                 &self.state.workspaces,
                 &self.state.terminals,
@@ -42,7 +42,7 @@ impl App {
                 self.state.collapsed_space_keys.clone(),
                 self.state.collapsed_agent_keys.clone(),
                 agent_manual_order_keys,
-                pane_section_order_refs,
+                pane_section_order_keys,
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)

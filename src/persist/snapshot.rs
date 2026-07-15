@@ -9,7 +9,7 @@ use crate::terminal::TerminalRuntimeRegistry;
 use crate::workspace::Workspace;
 
 /// Current snapshot format version.
-pub(super) const SNAPSHOT_VERSION: u32 = 8;
+pub(super) const SNAPSHOT_VERSION: u32 = 9;
 
 /// Serializable snapshot of the entire herdr session.
 #[derive(Serialize, Deserialize)]
@@ -47,19 +47,29 @@ pub struct SessionSnapshot {
     pub pane_section_order: Option<PaneSectionOrderSnapshot>,
 }
 
-/// Persisted flat Panes-section ordering. Entries reference non-agent panes by
-/// stable keys (workspace id + public pane number) rather than a positional
-/// index.
+/// Persisted flat Panes-section ordering. Pane entries reference non-agent panes
+/// by stable keys (workspace id + public pane number) rather than a positional
+/// index; line-splits carry their id and name.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct PaneSectionOrderSnapshot {
     pub entries: Vec<PaneSectionEntrySnapshot>,
 }
 
-/// A single persisted Panes-section entry.
+/// A single persisted Panes-section entry. Panes keep the stable
+/// (workspace id + public pane number) keying; line-splits carry their id and
+/// name. Untagged so pre-line-split snapshots (bare pane objects, version 7 and
+/// earlier) still parse as the `Pane` variant.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct PaneSectionEntrySnapshot {
-    pub workspace_id: String,
-    pub pane_number: usize,
+#[serde(untagged)]
+pub enum PaneSectionEntrySnapshot {
+    Pane {
+        workspace_id: String,
+        pane_number: usize,
+    },
+    LineSplit {
+        line_split_id: u64,
+        name: String,
+    },
 }
 
 /// Persisted flat manual agent ordering. Entries reference panes by stable keys
@@ -342,15 +352,26 @@ pub fn capture(
     collapsed_space_keys: std::collections::HashSet<String>,
     collapsed_agent_keys: std::collections::HashSet<String>,
     agent_manual_order_keys: Vec<crate::app::state::ManualOrderEntryKey>,
-    pane_section_order_refs: Vec<crate::app::state::PaneSectionRef>,
+    pane_section_order_keys: Vec<crate::app::state::PaneManualEntryKey>,
 ) -> SessionSnapshot {
     let pane_section_order =
-        (!pane_section_order_refs.is_empty()).then(|| PaneSectionOrderSnapshot {
-            entries: pane_section_order_refs
+        (!pane_section_order_keys.is_empty()).then(|| PaneSectionOrderSnapshot {
+            entries: pane_section_order_keys
                 .into_iter()
-                .map(|pane_ref| PaneSectionEntrySnapshot {
-                    workspace_id: pane_ref.workspace_id,
-                    pane_number: pane_ref.pane_number,
+                .map(|key| match key {
+                    crate::app::state::PaneManualEntryKey::Pane {
+                        workspace_id,
+                        pane_number,
+                    } => PaneSectionEntrySnapshot::Pane {
+                        workspace_id,
+                        pane_number,
+                    },
+                    crate::app::state::PaneManualEntryKey::LineSplit { id, name } => {
+                        PaneSectionEntrySnapshot::LineSplit {
+                            line_split_id: id,
+                            name,
+                        }
+                    }
                 })
                 .collect(),
         });
@@ -723,7 +744,7 @@ mod tests {
             state.collapsed_space_keys.clone(),
             state.collapsed_agent_keys.clone(),
             state.agent_manual_order.to_public_keys(&state.workspaces),
-            state.pane_section_order.to_refs(),
+            state.pane_section_order.to_entry_keys(),
         )
     }
 
@@ -779,11 +800,15 @@ mod tests {
             agent_manual_order: None,
             pane_section_order: Some(PaneSectionOrderSnapshot {
                 entries: vec![
-                    PaneSectionEntrySnapshot {
+                    PaneSectionEntrySnapshot::Pane {
                         workspace_id: "w2".into(),
                         pane_number: 1,
                     },
-                    PaneSectionEntrySnapshot {
+                    PaneSectionEntrySnapshot::LineSplit {
+                        line_split_id: 5,
+                        name: "scheduled".into(),
+                    },
+                    PaneSectionEntrySnapshot::Pane {
                         workspace_id: "w1".into(),
                         pane_number: 3,
                     },
@@ -797,11 +822,22 @@ mod tests {
             .pane_section_order
             .expect("pane section order persisted")
             .entries;
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].workspace_id, "w2");
-        assert_eq!(entries[0].pane_number, 1);
-        assert_eq!(entries[1].workspace_id, "w1");
-        assert_eq!(entries[1].pane_number, 3);
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(
+            &entries[0],
+            PaneSectionEntrySnapshot::Pane { workspace_id, pane_number }
+                if workspace_id == "w2" && *pane_number == 1
+        ));
+        assert!(matches!(
+            &entries[1],
+            PaneSectionEntrySnapshot::LineSplit { line_split_id, name }
+                if *line_split_id == 5 && name == "scheduled"
+        ));
+        assert!(matches!(
+            &entries[2],
+            PaneSectionEntrySnapshot::Pane { workspace_id, pane_number }
+                if workspace_id == "w1" && *pane_number == 3
+        ));
     }
 
     #[test]
@@ -897,7 +933,7 @@ mod tests {
 
         let snap = capture_from_state(&state);
         assert_eq!(snap.version, SNAPSHOT_VERSION);
-        assert_eq!(SNAPSHOT_VERSION, 8);
+        assert_eq!(SNAPSHOT_VERSION, 9);
 
         let json = serde_json::to_string(&snap).unwrap();
         let parsed = parse_snapshot(&json).unwrap();
@@ -936,6 +972,93 @@ mod tests {
         assert!(matches!(rebuilt.order[2], ManualEntry::Pane(_)));
         // Next id sits above the restored maximum.
         assert!(rebuilt.next_line_split_id > split_id.0);
+    }
+
+    #[test]
+    fn pane_section_line_split_survives_capture_serialize_and_restore() {
+        use crate::app::state::{PaneManualEntry, PaneSectionOrder};
+
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.reconcile_pane_section_order();
+        // Two non-agent panes; insert a line-split between them.
+        assert_eq!(state.pane_section_order.order.len(), 2);
+        let split_id = state
+            .pane_section_order
+            .new_line_split("scheduled".to_string(), 1);
+
+        let snap = capture_from_state(&state);
+        assert_eq!(snap.version, SNAPSHOT_VERSION);
+
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed = parse_snapshot(&json).unwrap();
+
+        // Rebuild the Panes-section order as restore does.
+        let keys: Vec<crate::app::state::PaneManualEntryKey> = parsed
+            .pane_section_order
+            .expect("pane section order parsed")
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                PaneSectionEntrySnapshot::Pane {
+                    workspace_id,
+                    pane_number,
+                } => crate::app::state::PaneManualEntryKey::Pane {
+                    workspace_id: workspace_id.clone(),
+                    pane_number: *pane_number,
+                },
+                PaneSectionEntrySnapshot::LineSplit {
+                    line_split_id,
+                    name,
+                } => crate::app::state::PaneManualEntryKey::LineSplit {
+                    id: *line_split_id,
+                    name: name.clone(),
+                },
+            })
+            .collect();
+        let rebuilt = PaneSectionOrder::from_entry_keys(&keys, &state.workspaces);
+
+        // Position preserved: line-split is the middle entry with its id/name.
+        assert!(matches!(
+            &rebuilt.order[1],
+            PaneManualEntry::LineSplit { id, name } if *id == split_id && name == "scheduled"
+        ));
+        assert!(matches!(rebuilt.order[0], PaneManualEntry::Pane(_)));
+        assert!(matches!(rebuilt.order[2], PaneManualEntry::Pane(_)));
+        // Next id sits above the restored maximum.
+        assert!(rebuilt.next_line_split_id > split_id.0);
+    }
+
+    #[test]
+    fn v7_pane_section_order_without_splits_still_loads() {
+        // A version-7 snapshot stored bare pane objects (no line-splits). The
+        // untagged entry enum must still parse those as `Pane` entries.
+        let json = serde_json::json!({
+            "version": 7,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "pane_section_order": {
+                "entries": [
+                    { "workspace_id": "w1", "pane_number": 2 },
+                    { "workspace_id": "w2", "pane_number": 1 }
+                ]
+            }
+        })
+        .to_string();
+
+        let restored = parse_snapshot(&json).unwrap();
+        assert_eq!(restored.version, 7);
+        let entries = restored
+            .pane_section_order
+            .expect("v7 pane section order parses")
+            .entries;
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(
+            &entries[0],
+            PaneSectionEntrySnapshot::Pane { workspace_id, pane_number }
+                if workspace_id == "w1" && *pane_number == 2
+        ));
+        assert!(matches!(&entries[1], PaneSectionEntrySnapshot::Pane { .. }));
     }
 
     #[test]

@@ -6,8 +6,9 @@ use tracing::warn;
 use crate::{
     app::state::{
         AgentPanelSort, AgentPressState, AppState, ContextMenuKind, ContextMenuState, DragState,
-        DragTarget, ManualEntryRef, MenuListState, Mode, PaneSectionPressState,
-        RightClickPassthroughGesture, TabPressState, ViewLayout, WorkspacePressState,
+        DragTarget, LineSplitSection, ManualEntryRef, MenuListState, Mode, PaneManualEntryRef,
+        PaneSectionPressState, RightClickPassthroughGesture, TabPressState, ViewLayout,
+        WorkspacePressState,
     },
     layout::{PaneInfo, SplitBorder},
     selection::Selection,
@@ -52,7 +53,7 @@ pub(super) enum MouseAction {
         insert_idx: usize,
     },
     MovePaneSectionEntry {
-        source: crate::app::state::PaneSectionRef,
+        source: PaneManualEntryRef,
         insert_idx: usize,
     },
     SetSplitRatio {
@@ -616,9 +617,21 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some(entry) = self.pane_section_ref_at_row(mouse.row) {
+                    if self.mouse_capture
+                        && self.on_pane_section_split_button(mouse.column, mouse.row)
+                    {
+                        // Insert a new empty line-split at the top of the Panes
+                        // order and immediately open rename so the user can name it.
+                        let id = self.pane_section_order.new_line_split(String::new(), 0);
+                        self.mark_session_dirty();
+                        super::modal::open_rename_line_split(self, LineSplitSection::Panes, id);
+                        return None;
+                    }
+
+                    if let Some(entry) = self.pane_section_entry_ref_at_row(mouse.row) {
                         // Record a press so a drag can promote to a reorder. On
-                        // release without a drag, the row activates its tab.
+                        // release without a drag, a pane row focuses its pane while a
+                        // line-split row is a no-op.
                         self.pane_section_press = Some(PaneSectionPressState {
                             entry,
                             start_col: mouse.column,
@@ -646,7 +659,7 @@ impl AppState {
                         // immediately open rename so the user can name it.
                         let id = self.agent_manual_order.new_line_split(String::new(), 0);
                         self.mark_session_dirty();
-                        super::modal::open_rename_line_split(self, id);
+                        super::modal::open_rename_line_split(self, LineSplitSection::Agents, id);
                         return None;
                     }
 
@@ -1050,14 +1063,17 @@ impl AppState {
                             }
                         }
                         if let Some(press) = pane_section_press {
-                            // A plain click on a Panes-section row focuses that pane
-                            // in its workspace (which may be a different space),
-                            // switching workspace and tab as needed.
-                            if let Some((ws_idx, pane_id)) =
-                                self.resolve_pane_section_ref(&press.entry)
-                            {
-                                self.mode = Mode::Terminal;
-                                return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                            // A plain click on a Panes-section pane row focuses that
+                            // pane in its workspace (which may be a different space),
+                            // switching workspace and tab as needed. A line-split row
+                            // click is a no-op.
+                            if let PaneManualEntryRef::Pane(pane_ref) = &press.entry {
+                                if let Some((ws_idx, pane_id)) =
+                                    self.resolve_pane_section_ref(pane_ref)
+                                {
+                                    self.mode = Mode::Terminal;
+                                    return Some(MouseAction::FocusPane { ws_idx, pane_id });
+                                }
                             }
                         }
                     }
@@ -1179,9 +1195,23 @@ impl AppState {
                         list: MenuListState::new(0),
                     });
                     self.mode = Mode::ContextMenu;
+                } else if let Some(id) = self.pane_section_line_split_at_row(mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::LineSplit {
+                            section: LineSplitSection::Panes,
+                            id,
+                        },
+                        x: mouse.column,
+                        y: mouse.row,
+                        list: MenuListState::new(0),
+                    });
+                    self.mode = Mode::ContextMenu;
                 } else if let Some(id) = self.agent_panel_line_split_at_row(mouse.row) {
                     self.context_menu = Some(ContextMenuState {
-                        kind: ContextMenuKind::LineSplit { id },
+                        kind: ContextMenuKind::LineSplit {
+                            section: LineSplitSection::Agents,
+                            id,
+                        },
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
