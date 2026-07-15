@@ -1401,6 +1401,26 @@ status_indicators = "symbols"
     }
 
     #[test]
+    fn removed_config_keys_are_tolerated() {
+        // Older configs may still carry the removed `[ui.agent_panel]` row
+        // template and the removed `[experimental].hide_tabs_with_agents`
+        // key. Unknown fields must be ignored so those configs keep loading.
+        let toml = r#"
+[ui.agent_panel]
+rows = [
+  " {icon} {tab}",
+  " {space:darkgrey} { · status}",
+]
+
+[experimental]
+hide_tabs_with_agents = true
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        // Unrelated agent-panel config still parses to its default.
+        assert_eq!(config.ui.agent_panel_sort, AgentPanelSortConfig::Spaces);
+    }
+
+    #[test]
     fn pane_appearance_defaults_and_parse() {
         let default_config = Config::default();
         assert!(default_config.ui.pane_borders);
