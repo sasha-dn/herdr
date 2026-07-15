@@ -1682,8 +1682,6 @@ pub struct AppState {
     /// Flat client-only manual ordering of non-agent tabs for the Tabs section
     /// (TUI presentation state).
     pub(crate) tab_section_order: TabSectionOrder,
-    /// Compiled row templates for the two lines of each agent-panel entry.
-    pub agent_panel_row_templates: [crate::ui::RowTemplate; 2],
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -2066,7 +2064,6 @@ impl AppState {
             agent_panel_sort: AgentPanelSort::Spaces,
             agent_manual_order: AgentManualOrder::default(),
             tab_section_order: TabSectionOrder::default(),
-            agent_panel_row_templates: crate::ui::RowTemplate::default_agent_panel_rows(),
             next_agent_state_change_seq: 0,
             mouse_capture: true,
             right_click_passthrough_modifiers: None,

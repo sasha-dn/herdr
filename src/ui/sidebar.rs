@@ -1,12 +1,11 @@
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
 
-use super::row_template::RowContext;
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
@@ -21,6 +20,103 @@ const AGENT_PANEL_HEADER_ROWS: u16 = 3;
 const TABS_SECTION_HEADER_ROWS: u16 = 2;
 /// Content height of a single Tabs-section row: tab name line + space name line.
 const TAB_SECTION_ROW_HEIGHT: u16 = 2;
+
+/// Fixed dark grey used for the space (workspace) name on an agent row's second
+/// line. Resolved through `parse_color_checked` so it matches the `darkgrey`
+/// config color exactly, independent of theme or active state.
+fn agent_row_space_color() -> Color {
+    crate::config::parse_color_checked("darkgrey").unwrap_or(Color::DarkGray)
+}
+
+/// Runtime values and state-derived styles for one agent-panel entry. The
+/// layout is fixed at two lines:
+///
+/// - Line 1: `" {icon} {tab}"` - a leading space, the status icon (keeping its
+///   intrinsic state color), then the tab name. The tab and its separating
+///   space are dropped together when the pane has no tab label.
+/// - Line 2: `" {space} · {status}"` - a leading space, the space (workspace)
+///   name in fixed dark grey, then ` · ` and the status text. The ` · `
+///   separator and status are dropped together when the status is empty.
+pub(crate) struct AgentRowContext<'a> {
+    pub icon: &'a str,
+    pub icon_style: Style,
+    pub space: &'a str,
+    pub tab: Option<&'a str>,
+    pub status: &'a str,
+    pub status_color: Color,
+    pub is_active: bool,
+}
+
+impl AgentRowContext<'_> {
+    /// Bold "name" style for the tab label: brighter foreground when the row is
+    /// the active pane, dimmer otherwise.
+    fn name_style(&self, p: &Palette) -> Style {
+        let fg = if self.is_active { p.text } else { p.subtext0 };
+        Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    }
+
+    /// Status style: the live state color, dimmed when the row is inactive.
+    fn status_style(&self) -> Style {
+        let style = Style::default().fg(self.status_color);
+        if self.is_active {
+            style
+        } else {
+            style.add_modifier(Modifier::DIM)
+        }
+    }
+
+    /// First line: leading space, status icon, then the tab name.
+    fn line_one(&self, p: &Palette, max_width: usize) -> Vec<Span<'static>> {
+        let mut spans = vec![
+            Span::styled(" ".to_string(), Style::default()),
+            Span::styled(self.icon.to_string(), self.icon_style),
+        ];
+        if let Some(tab) = self.tab.filter(|tab| !tab.is_empty()) {
+            spans.push(Span::styled(format!(" {tab}"), self.name_style(p)));
+        }
+        truncate_agent_row_spans(spans, max_width)
+    }
+
+    /// Second line: leading space, dark-grey space name, then ` · status`.
+    fn line_two(&self, max_width: usize) -> Vec<Span<'static>> {
+        let mut spans = vec![
+            Span::styled(" ".to_string(), Style::default()),
+            Span::styled(
+                self.space.to_string(),
+                Style::default().fg(agent_row_space_color()),
+            ),
+        ];
+        if !self.status.is_empty() {
+            spans.push(Span::styled(
+                format!(" · {}", self.status),
+                self.status_style(),
+            ));
+        }
+        truncate_agent_row_spans(spans, max_width)
+    }
+}
+
+/// Trim a span list so its combined display width does not exceed `max_width`,
+/// eliding the boundary span with an ellipsis when it overflows.
+fn truncate_agent_row_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+    for span in spans {
+        let width = display_width(&span.content);
+        if used + width <= max_width {
+            used += width;
+            out.push(span);
+            continue;
+        }
+        let remaining = max_width.saturating_sub(used);
+        if remaining > 0 {
+            let truncated = truncate_end(&span.content, remaining);
+            out.push(Span::styled(truncated, span.style));
+        }
+        break;
+    }
+    out
+}
 
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
@@ -1632,21 +1728,19 @@ fn render_agent_detail(
                     Style::default()
                 };
 
-                let row_ctx = RowContext {
+                let row_ctx = AgentRowContext {
                     icon,
                     icon_style,
                     space: &detail.primary_label,
                     tab: detail.primary_tab_label.as_deref(),
                     status: label,
                     status_color: label_color,
-                    agent: detail.agent_label.as_deref(),
-                    custom: detail.custom_status.as_deref(),
                     is_active,
                 };
 
+                let lines = [row_ctx.line_one(p, max_width), row_ctx.line_two(max_width)];
                 let mut line_y = area_row.y;
-                for template in &app.agent_panel_row_templates {
-                    let spans = template.render(&row_ctx, p, max_width);
+                for spans in lines {
                     frame.render_widget(
                         Paragraph::new(Line::from(spans)).style(row_style),
                         Rect::new(body.x, line_y, body.width, 1),
@@ -1735,6 +1829,112 @@ mod tests {
     use super::*;
     use crate::{detect::Agent, workspace::Workspace};
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn agent_row_palette() -> Palette {
+        Palette::catppuccin()
+    }
+
+    fn agent_row_ctx() -> AgentRowContext<'static> {
+        AgentRowContext {
+            icon: "✓",
+            icon_style: Style::default().fg(Color::Green),
+            space: "herdr",
+            tab: Some("main"),
+            status: "idle",
+            status_color: Color::Green,
+            is_active: false,
+        }
+    }
+
+    fn agent_row_text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn agent_row_lines_match_hardcoded_layout() {
+        let ctx = agent_row_ctx();
+        let p = agent_row_palette();
+        assert_eq!(agent_row_text(&ctx.line_one(&p, 80)), " ✓ main");
+        assert_eq!(agent_row_text(&ctx.line_two(80)), " herdr · idle");
+    }
+
+    #[test]
+    fn agent_row_empty_tab_drops_tab_and_separating_space() {
+        let mut ctx = agent_row_ctx();
+        ctx.tab = None;
+        let p = agent_row_palette();
+        assert_eq!(agent_row_text(&ctx.line_one(&p, 80)), " ✓");
+
+        ctx.tab = Some("");
+        assert_eq!(agent_row_text(&ctx.line_one(&p, 80)), " ✓");
+    }
+
+    #[test]
+    fn agent_row_empty_status_drops_separator_and_status() {
+        let mut ctx = agent_row_ctx();
+        ctx.status = "";
+        assert_eq!(agent_row_text(&ctx.line_two(80)), " herdr");
+    }
+
+    #[test]
+    fn agent_row_space_uses_fixed_dark_grey() {
+        // The space color is resolved from the `darkgrey` config color and is
+        // independent of active state.
+        let expected = crate::config::parse_color_checked("darkgrey").expect("darkgrey resolves");
+        assert_eq!(agent_row_space_color(), expected);
+        let mut ctx = agent_row_ctx();
+        let space_span = |ctx: &AgentRowContext| ctx.line_two(80)[1].style.fg;
+        assert_eq!(space_span(&ctx), Some(expected));
+        ctx.is_active = true;
+        assert_eq!(space_span(&ctx), Some(expected));
+    }
+
+    #[test]
+    fn agent_row_tab_uses_active_name_style() {
+        let p = agent_row_palette();
+        let mut ctx = agent_row_ctx();
+
+        ctx.is_active = true;
+        let active = ctx.line_one(&p, 80);
+        assert_eq!(active[2].style.fg, Some(p.text));
+        assert!(active[2].style.add_modifier.contains(Modifier::BOLD));
+
+        ctx.is_active = false;
+        let inactive = ctx.line_one(&p, 80);
+        assert_eq!(inactive[2].style.fg, Some(p.subtext0));
+        assert!(inactive[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn agent_row_status_dims_when_inactive() {
+        let mut ctx = agent_row_ctx();
+
+        ctx.is_active = true;
+        let active = ctx.line_two(80);
+        assert_eq!(active[2].style.fg, Some(Color::Green));
+        assert!(!active[2].style.add_modifier.contains(Modifier::DIM));
+
+        ctx.is_active = false;
+        let inactive = ctx.line_two(80);
+        assert_eq!(inactive[2].style.fg, Some(Color::Green));
+        assert!(inactive[2].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn agent_row_icon_keeps_intrinsic_style() {
+        let ctx = agent_row_ctx();
+        let spans = ctx.line_one(&agent_row_palette(), 80);
+        assert_eq!(spans[1].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn agent_row_lines_truncate_to_width() {
+        let mut ctx = agent_row_ctx();
+        ctx.space = "a-very-long-workspace-name";
+        let text = agent_row_text(&ctx.line_two(6));
+        assert_eq!(display_width(&text), 6);
+        assert!(text.ends_with('…'));
+    }
 
     #[test]
     fn render_sidebar_toggle_draws_expanded_collapse_icon() {
