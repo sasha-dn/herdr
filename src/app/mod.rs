@@ -5076,6 +5076,258 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn agent_set_parent_assigns_changes_and_persists() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("agent-set-parent");
+        let pane_b = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let pane_c = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let pane_a = workspace.tabs[0]
+            .panes
+            .keys()
+            .copied()
+            .find(|id| *id != pane_b && *id != pane_c)
+            .unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mut receivers = Vec::new();
+        for pane_id in [pane_a, pane_b, pane_c] {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let (runtime, receiver) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 8);
+            app.terminal_runtimes.insert(terminal_id, runtime);
+            receivers.push(receiver);
+        }
+        let pane_id_of = |app: &crate::app::App, pane_id: crate::layout::PaneId| -> String {
+            app.pane_info(0, pane_id).unwrap().pane_id
+        };
+        let root_pane_id = pane_id_of(&app, pane_a);
+        let child_pane_id = pane_id_of(&app, pane_b);
+        let other_pane_id = pane_id_of(&app, pane_c);
+
+        let start = |app: &mut crate::app::App, name: &str, pane_id: String| -> String {
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: format!("req_start_{name}"),
+                method: crate::api::schema::Method::AgentStart(
+                    crate::api::schema::AgentStartParams {
+                        name: name.into(),
+                        kind: "pi".into(),
+                        pane_id,
+                        args: Vec::new(),
+                        timeout_ms: Some(4_000),
+                        parent: None,
+                    },
+                ),
+            });
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["result"]["type"], "agent_started");
+            response["result"]["agent"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        let set_parent =
+            |app: &mut crate::app::App, target: &str, parent: &str| -> serde_json::Value {
+                let response = app.handle_api_request(crate::api::schema::Request {
+                    id: "req_set_parent".into(),
+                    method: crate::api::schema::Method::AgentSetParent(
+                        crate::api::schema::AgentSetParentParams {
+                            target: target.into(),
+                            parent: parent.into(),
+                        },
+                    ),
+                });
+                serde_json::from_str(&response).unwrap()
+            };
+
+        let root = start(&mut app, "root", root_pane_id);
+        let child = start(&mut app, "child", child_pane_id);
+        let other = start(&mut app, "other", other_pane_id);
+
+        // Successful reparent records the child's parent as root.
+        let resp = set_parent(&mut app, &child, &root);
+        assert_eq!(resp["result"]["type"], "agent_info");
+        assert_eq!(resp["result"]["agent"]["parent"], root);
+
+        // The child's PaneState now stores a parent link.
+        let has_parent_link = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .filter(|pane| pane.parent.is_some())
+            .count();
+        assert_eq!(has_parent_link, 1, "exactly one child stores a parent link");
+
+        // Reparenting an agent that already had a parent changes it.
+        let resp = set_parent(&mut app, &child, &other);
+        assert_eq!(resp["result"]["agent"]["parent"], other);
+
+        // Capture the raw child pane id and its expected parent ref for the
+        // snapshot roundtrip below.
+        let (child_raw, expected_ref) = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .find_map(|(id, pane)| pane.parent.clone().map(|parent| (id.raw(), parent)))
+            .expect("child has a parent link");
+
+        // The reparent persists across a snapshot roundtrip.
+        let snap = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.sidebar_width,
+            app.state.sidebar_section_split,
+            app.state.sidebar_pane_section_split,
+            app.state.collapsed_space_keys.clone(),
+            app.state.collapsed_agent_keys.clone(),
+            app.state
+                .agent_manual_order
+                .to_public_keys(&app.state.workspaces),
+            app.state.pane_section_order.to_entry_keys(),
+        );
+        let json = serde_json::to_string(&snap).unwrap();
+        let parsed: crate::persist::SessionSnapshot = serde_json::from_str(&json).unwrap();
+        let restored = parsed.workspaces[0]
+            .tabs
+            .iter()
+            .find_map(|tab| tab.panes.get(&child_raw))
+            .expect("child pane persisted");
+        let restored_ref = restored.parent.as_ref().expect("parent link persisted");
+        assert_eq!(restored_ref.workspace_id, expected_ref.workspace_id);
+        assert_eq!(restored_ref.pane_number, expected_ref.pane_number);
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_set_parent_rejects_bad_targets_self_and_cycle() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("agent-set-parent-errors");
+        let plain_root = workspace.tabs[0].root_pane;
+        let pane_b = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let pane_c = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let pane_d = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        // The original workspace pane is a plain (non-agent) terminal.
+        let plain_pane = app.pane_info(0, plain_root).unwrap().pane_id;
+
+        let mut receivers = Vec::new();
+        for pane_id in [pane_b, pane_c, pane_d] {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let (runtime, receiver) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 8);
+            app.terminal_runtimes.insert(terminal_id, runtime);
+            receivers.push(receiver);
+        }
+        let pane_id_of = |app: &crate::app::App, pane_id: crate::layout::PaneId| -> String {
+            app.pane_info(0, pane_id).unwrap().pane_id
+        };
+        let root_pane_id = pane_id_of(&app, pane_b);
+        let child_pane_id = pane_id_of(&app, pane_c);
+        let grandchild_pane_id = pane_id_of(&app, pane_d);
+
+        let start = |app: &mut crate::app::App, name: &str, pane_id: String| -> String {
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: format!("req_start_{name}"),
+                method: crate::api::schema::Method::AgentStart(
+                    crate::api::schema::AgentStartParams {
+                        name: name.into(),
+                        kind: "pi".into(),
+                        pane_id,
+                        args: Vec::new(),
+                        timeout_ms: Some(4_000),
+                        parent: None,
+                    },
+                ),
+            });
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["result"]["type"], "agent_started");
+            response["result"]["agent"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        let set_parent =
+            |app: &mut crate::app::App, target: &str, parent: &str| -> serde_json::Value {
+                let response = app.handle_api_request(crate::api::schema::Request {
+                    id: "req_set_parent".into(),
+                    method: crate::api::schema::Method::AgentSetParent(
+                        crate::api::schema::AgentSetParentParams {
+                            target: target.into(),
+                            parent: parent.into(),
+                        },
+                    ),
+                });
+                serde_json::from_str(&response).unwrap()
+            };
+
+        let root = start(&mut app, "root", root_pane_id);
+        let child = start(&mut app, "child", child_pane_id);
+        let grandchild = start(&mut app, "grandchild", grandchild_pane_id);
+
+        // Build a chain root -> child -> grandchild.
+        assert_eq!(
+            set_parent(&mut app, &child, &root)["result"]["type"],
+            "agent_info"
+        );
+        assert_eq!(
+            set_parent(&mut app, &grandchild, &child)["result"]["type"],
+            "agent_info"
+        );
+
+        // Child target does not resolve.
+        let missing_child = set_parent(&mut app, "w9:pZ", &root);
+        assert_eq!(missing_child["error"]["code"], "agent_not_found");
+
+        // Parent target does not resolve.
+        let missing_parent = set_parent(&mut app, &child, "w9:pZ");
+        assert_eq!(missing_parent["error"]["code"], "agent_parent_not_found");
+
+        // An agent cannot be its own parent.
+        let self_parent = set_parent(&mut app, &root, &root);
+        assert_eq!(self_parent["error"]["code"], "agent_set_parent_self");
+
+        // Assigning a descendant as parent would create a cycle.
+        let cycle = set_parent(&mut app, &root, &grandchild);
+        assert_eq!(cycle["error"]["code"], "agent_set_parent_cycle");
+
+        // A non-agent pane cannot be a parent, nor can a non-agent be a child.
+        let parent_not_agent = set_parent(&mut app, &child, &plain_pane);
+        assert_eq!(
+            parent_not_agent["error"]["code"],
+            "agent_set_parent_parent_not_agent"
+        );
+        let child_not_agent = set_parent(&mut app, &plain_pane, &root);
+        assert_eq!(
+            child_not_agent["error"]["code"],
+            "agent_set_parent_target_not_agent"
+        );
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
     #[test]
     fn pane_close_request_closes_only_the_target_tab_when_other_tabs_exist() {
         let mut app = test_app();

@@ -295,6 +295,7 @@ herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [
 herdr agent send-keys <target> <key> [key ...]
 herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
+herdr agent set-parent <target> <parent>
 herdr agent focus <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
 herdr agent attach <target> [--takeover]
@@ -307,7 +308,9 @@ Agent targets are either a unique live agent name or the pane ID that currently 
 
 `agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, and `maki`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
 
-`agent start --parent <target>` records the started agent's parent (resolved with the same target rules as other agent commands) without changing where `--pane` places it. The child then nests under its parent in the agents panel across every sort mode. It errors with `agent_parent_not_found` if the target does not resolve to an agent pane. The parent link is set only at start time; there is no reparenting command.
+`agent start --parent <target>` records the started agent's parent (resolved with the same target rules as other agent commands) without changing where `--pane` places it. The child then nests under its parent in the agents panel across every sort mode. It errors with `agent_parent_not_found` if the target does not resolve to an agent pane.
+
+`agent set-parent <target> <parent>` assigns or changes the parent of an already-running agent. Both targets resolve with the same rules and must be agent panes. It only assigns or changes the link; it never clears it. The command rejects a target that is its own parent and any assignment that would create a cycle (a parent that is the child itself or one of its descendants). The change takes effect immediately, so the child re-nests under its new parent on the next agents-panel render, and the link persists across restart.
 
 A successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
 

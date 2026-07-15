@@ -146,6 +146,16 @@ herdr agent start helper --kind claude --pane w1:p2 --parent w1:pC
 
 The child nests under the parent in the agents panel, indented one level, in every sort mode (grouped, priority, manual). A parent row gains a third summary line, for example `Subagents - 2 idle 3 blocked`, aggregating the state of its direct children. Click the `▾`/`▸` glyph on a parent row to collapse or expand its subtree; the collapse state is remembered across restarts. The parent link itself survives restart, and closing a parent promotes its children to top-level agents.
 
+### Reparent a running agent
+
+Set or change the parent of an already-running agent with `agent set-parent`. Both targets resolve the same way as other agent commands and must be agent panes:
+
+```bash
+herdr agent set-parent helper reviewer
+```
+
+This only assigns or changes the parent link; it never clears it. Herdr rejects making an agent its own parent and rejects any assignment that would form a cycle (a parent that is the child itself or one of its descendants). The child re-nests under its new parent on the next render, and the new link persists across restart.
+
 ## Attach directly to an agent
 
 Attach your current terminal to one agent terminal instead of the full Herdr UI:
