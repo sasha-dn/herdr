@@ -1,8 +1,8 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentRenameParams, AgentSendParams, AgentStartParams, AgentTarget, PaneReadResult, ReadFormat,
-    ReadSource, ResponseResult,
+    AgentRenameParams, AgentSendParams, AgentSetParentParams, AgentStartParams, AgentTarget,
+    PaneReadResult, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::app::App;
 
@@ -40,6 +40,19 @@ impl App {
         let agent = match self.rename_agent_target(&params.target, params.name) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_rename_error_body(err)),
+        };
+
+        encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    pub(super) fn handle_agent_set_parent(
+        &mut self,
+        id: String,
+        params: AgentSetParentParams,
+    ) -> String {
+        let agent = match self.set_agent_parent(&params.target, &params.parent) {
+            Ok(agent) => agent,
+            Err(err) => return encode_error_body(id, self.agent_set_parent_error_body(err)),
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })

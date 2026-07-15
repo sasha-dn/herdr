@@ -111,6 +111,8 @@ pub enum Method {
     AgentSend(AgentSendParams),
     #[serde(rename = "agent.rename")]
     AgentRename(AgentRenameParams),
+    #[serde(rename = "agent.set_parent")]
+    AgentSetParent(AgentSetParentParams),
     #[serde(rename = "agent.focus")]
     AgentFocus(AgentTarget),
     #[serde(rename = "agent.start")]

@@ -30,6 +30,16 @@ pub struct AgentRenameParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentSetParentParams {
+    /// Target of the agent whose parent is being set (terminal id, public pane
+    /// id like `"w1:p2"`, or agent name).
+    pub target: String,
+    /// Target of the agent to record as `target`'s parent, resolved with the
+    /// same rules. Assigns or changes the parent link; it never clears it.
+    pub parent: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentStartParams {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

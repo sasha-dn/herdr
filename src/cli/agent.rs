@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::api::schema::{
-    AgentReadParams, AgentRenameParams, AgentSendParams, AgentStartParams, AgentStatus,
-    AgentTarget, EmptyParams, Method, ReadFormat, ReadSource, Request, Subscription,
+    AgentReadParams, AgentRenameParams, AgentSendParams, AgentSetParentParams, AgentStartParams,
+    AgentStatus, AgentTarget, EmptyParams, Method, ReadFormat, ReadSource, Request, Subscription,
 };
 
 pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
@@ -17,6 +17,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "read" => agent_read(&args[1..]),
         "send" => agent_send(&args[1..]),
         "rename" => agent_rename(&args[1..]),
+        "set-parent" => agent_set_parent(&args[1..]),
         "focus" => agent_focus(&args[1..]),
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
@@ -572,6 +573,21 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn agent_set_parent(args: &[String]) -> std::io::Result<i32> {
+    if args.len() != 2 {
+        eprintln!("usage: herdr agent set-parent <target> <parent>");
+        return Ok(2);
+    }
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:set-parent".into(),
+        method: Method::AgentSetParent(AgentSetParentParams {
+            target: args[0].clone(),
+            parent: args[1].clone(),
+        }),
+    })?)
+}
+
 fn agent_send(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
         eprintln!("usage: herdr agent send <target> <text>");
@@ -682,6 +698,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send <target> <text>");
     eprintln!("  herdr agent rename <target> <name>|--clear");
+    eprintln!("  herdr agent set-parent <target> <parent>");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
@@ -692,4 +709,21 @@ fn print_agent_help() {
     eprintln!(
         "  agent send writes literal text; use pane run when you want command text plus Enter"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_set_parent;
+
+    #[test]
+    fn set_parent_requires_two_positional_args() {
+        // No args, a single arg, and too many args all fail usage before any
+        // request is sent, returning the usage exit code.
+        assert_eq!(agent_set_parent(&[]).unwrap(), 2);
+        assert_eq!(agent_set_parent(&["w1:p1".into()]).unwrap(), 2);
+        assert_eq!(
+            agent_set_parent(&["w1:p1".into(), "w1:p2".into(), "extra".into()]).unwrap(),
+            2
+        );
+    }
 }

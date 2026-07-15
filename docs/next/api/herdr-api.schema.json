@@ -1014,6 +1014,23 @@
           ],
           "type": "object"
         },
+        "AgentSetParentParams": {
+          "properties": {
+            "parent": {
+              "description": "Target of the agent to record as `target`'s parent, resolved with the\nsame rules. Assigns or changes the parent link; it never clears it.",
+              "type": "string"
+            },
+            "target": {
+              "description": "Target of the agent whose parent is being set (terminal id, public pane\nid like `\"w1:p2\"`, or agent name).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "parent"
+          ],
+          "type": "object"
+        },
         "AgentStartParams": {
           "properties": {
             "argv": {
@@ -4074,6 +4091,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.set_parent",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentSetParentParams"
             }
           },
           "required": [
