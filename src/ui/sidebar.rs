@@ -2022,7 +2022,7 @@ fn render_line_split_row(frame: &mut Frame, body: Rect, y: u16, name: &str, p: &
     let dash_style = Style::default().fg(p.surface_dim);
     // The split name uses the same color as the workspace name in agent rows so
     // the label stays legible; the surrounding rule stays subtly dim.
-    let name_style = Style::default().fg(agent_row_space_color());
+    let name_style = Style::default().fg(crate::config::parse_color("darkgrey"));
     let trimmed = name.trim();
     let line = if trimmed.is_empty() {
         Line::from(Span::styled("─".repeat(width), dash_style))
