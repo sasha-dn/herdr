@@ -364,6 +364,10 @@ pub struct PaneInfo {
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<AgentSessionInfo>,
+    /// Public pane id (e.g. `"w1:p2"`) of this pane's parent agent, when it was
+    /// started as a child with `--parent`. Absent for root agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub revision: u64,
 }
 

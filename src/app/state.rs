@@ -1624,6 +1624,10 @@ pub struct AppState {
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Public pane ids (e.g. `"w1:p2"`) of agent-tree parents the user has
+    /// collapsed in the agents panel. Client-only TUI presentation state,
+    /// persisted like [`AppState::collapsed_space_keys`].
+    pub collapsed_agent_keys: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1772,6 +1776,25 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// Resolve a stable [`crate::pane::PaneParentRef`] to the live
+    /// `(ws_idx, PaneId)` of the parent pane, if it still exists. Returns `None`
+    /// when the referenced workspace or pane number is gone (e.g. the parent was
+    /// closed), which is how a child becomes a root in the agents-panel tree.
+    pub(crate) fn resolve_pane_parent(
+        &self,
+        parent: &crate::pane::PaneParentRef,
+    ) -> Option<(usize, PaneId)> {
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|ws| ws.id == parent.workspace_id)?;
+        let pane_id = self.workspaces[ws_idx]
+            .public_pane_numbers
+            .iter()
+            .find_map(|(pane_id, number)| (*number == parent.pane_number).then_some(*pane_id))?;
+        Some((ws_idx, pane_id))
     }
 
     /// Set the rename/name input text and place the caret at the end. Keeps
@@ -2005,6 +2028,7 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
+            collapsed_agent_keys: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -2605,6 +2629,32 @@ mod tests {
         state.ensure_test_terminals();
 
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn parent_link_on_adversarial_state_preserves_identity_invariants() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        // Link the newly split pane to the tab's root by stable public number,
+        // as `agent start --parent` does, against identity-scrambled state.
+        let ws = &mut state.workspaces[0];
+        let root = ws.tabs[ws.active_tab].root_pane;
+        let child = ws.test_split(ratatui::layout::Direction::Horizontal);
+        let parent_number = ws.public_pane_number(root).expect("root has number");
+        let workspace_id = ws.id.clone();
+        ws.pane_state_mut(child).expect("child pane").parent = Some(crate::pane::PaneParentRef {
+            workspace_id: workspace_id.clone(),
+            pane_number: parent_number,
+        });
+        state.ensure_test_terminals();
+
+        state.assert_invariants_for_test();
+
+        // The stable parent link resolves back to the root pane.
+        let parent_ref = crate::pane::PaneParentRef {
+            workspace_id,
+            pane_number: parent_number,
+        };
+        assert_eq!(state.resolve_pane_parent(&parent_ref), Some((0, root)));
     }
 
     #[test]

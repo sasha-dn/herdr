@@ -1146,6 +1146,11 @@ mod tests {
             last_agent_state_change_seq: None,
             custom_status: None,
             state_labels: std::collections::HashMap::new(),
+            parent_pane: None,
+            depth: 0,
+            has_children: false,
+            collapsed: false,
+            child_summary: Vec::new(),
         }
     }
 

@@ -333,8 +333,13 @@ impl App {
                         // Manual agent order (agents + line-splits) is client-only
                         // presentation state, so mutate it directly instead of
                         // routing through the runtime API path used by
-                        // workspace/tab moves.
-                        self.state.move_agent_entry(source, insert_idx);
+                        // workspace/tab moves. The drop index is in visible
+                        // tree-row space; translate it to the flat manual-order
+                        // space the reorder mutates.
+                        let base_idx = self
+                            .state
+                            .agent_manual_base_index_for_tree_insert(insert_idx);
+                        self.state.move_agent_entry(source, base_idx);
                     }
                     MouseAction::MovePaneSectionEntry { source, insert_idx } => {
                         // The Panes-section order is client-only presentation state
@@ -782,6 +787,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_section_split,
         state.sidebar_pane_section_split,
         state.collapsed_space_keys.clone(),
+        state.collapsed_agent_keys.clone(),
         state.agent_manual_order.to_public_keys(&state.workspaces),
         state.pane_section_order.to_refs(),
     )

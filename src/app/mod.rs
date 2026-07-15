@@ -458,6 +458,7 @@ impl App {
             sidebar_section_split,
             sidebar_pane_section_split,
             collapsed_space_keys,
+            collapsed_agent_keys,
             agent_manual_order,
             pane_section_order,
         ) = if no_session {
@@ -469,6 +470,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 state::AgentManualOrder::default(),
                 state::PaneSectionOrder::default(),
@@ -509,6 +511,7 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.sidebar_pane_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_agent_keys,
                     state::AgentManualOrder::default(),
                     state::PaneSectionOrder::default(),
                 )
@@ -531,6 +534,7 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.sidebar_pane_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_agent_keys,
                     agent_manual_order,
                     pane_section_order,
                 )
@@ -544,6 +548,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 state::AgentManualOrder::default(),
                 state::PaneSectionOrder::default(),
@@ -635,6 +640,7 @@ impl App {
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            collapsed_agent_keys,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -919,6 +925,7 @@ impl App {
             app.state.sidebar_pane_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.collapsed_agent_keys = snapshot.collapsed_agent_keys.clone();
         app.state.agent_manual_order = restore_agent_manual_order(snapshot, &app.state.workspaces);
         app.state.pane_section_order = restore_pane_section_order(snapshot, &app.state.workspaces);
         app.state.mode = if app.state.active.is_some() {
@@ -3930,6 +3937,7 @@ mod tests {
                 workspace_id: None,
                 tab_id: None,
                 split: Some(crate::api::schema::SplitDirection::Right),
+                parent: None,
                 focus: true,
                 argv: vec![exiting_test_command().into()],
                 env: Default::default(),
@@ -3944,6 +3952,76 @@ mod tests {
 
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(root));
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_start_with_parent_records_link_and_rejects_bad_targets() {
+        let mut app = test_app();
+        let workspace = Workspace::test_new("agent-tree");
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let start =
+            |app: &mut crate::app::App, name: &str, parent: Option<String>, ws: Option<String>| {
+                let response = app.handle_api_request(crate::api::schema::Request {
+                    id: format!("req_{name}"),
+                    method: crate::api::schema::Method::AgentStart(
+                        crate::api::schema::AgentStartParams {
+                            name: name.into(),
+                            cwd: None,
+                            workspace_id: ws,
+                            tab_id: None,
+                            split: Some(crate::api::schema::SplitDirection::Right),
+                            parent,
+                            focus: true,
+                            argv: vec![exiting_test_command().into()],
+                            env: Default::default(),
+                        },
+                    ),
+                });
+                serde_json::from_str::<serde_json::Value>(&response).unwrap()
+            };
+
+        // Root agent.
+        let root_resp = start(&mut app, "root", None, None);
+        assert_eq!(root_resp["result"]["type"], "agent_started");
+        let parent_pane_id = root_resp["result"]["agent"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Child agent linked to the root.
+        let child_resp = start(&mut app, "child", Some(parent_pane_id.clone()), None);
+        assert_eq!(child_resp["result"]["type"], "agent_started");
+        assert_eq!(child_resp["result"]["agent"]["parent"], parent_pane_id);
+
+        // The child's PaneState records the parent link.
+        let has_parent_link = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .any(|pane| pane.parent.is_some());
+        assert!(has_parent_link, "child pane stores a parent link");
+
+        // Unresolvable parent target errors clearly and starts nothing new.
+        let bad = start(&mut app, "orphan", Some("w9:pZ".into()), None);
+        assert_eq!(bad["error"]["code"], "agent_parent_not_found");
+
+        // --parent combined with --workspace is a conflict.
+        let conflict = start(
+            &mut app,
+            "conflict",
+            Some(parent_pane_id.clone()),
+            Some("w1".into()),
+        );
+        assert_eq!(conflict["error"]["code"], "agent_parent_placement_conflict");
 
         let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
         for (_terminal_id, runtime) in runtimes {
@@ -4793,6 +4871,7 @@ last_pane = "prefix+tab"
             sidebar_section_split: None,
             sidebar_pane_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             pane_section_order: None,
         };

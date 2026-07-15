@@ -1355,6 +1355,33 @@ impl AppState {
         true
     }
 
+    /// Translate an insert index expressed in visible tree-row space (what the
+    /// drop indicator uses) into an index in the flat `agent_manual_order.order`
+    /// (what [`move_agent_entry`] mutates). The two spaces differ once the tree
+    /// nests children under parents; in the flat case this is the identity.
+    ///
+    /// The dragged item lands at the base-order position of the row it was
+    /// dropped before. Because tree grouping is reapplied on every render, a
+    /// child always re-nests under its parent regardless of where it lands in
+    /// the base order, so a drag can never detach a child from its parent.
+    pub(crate) fn agent_manual_base_index_for_tree_insert(&self, tree_insert_idx: usize) -> usize {
+        use crate::app::state::ManualEntry;
+        let rows = crate::ui::agent_panel_rows(self);
+        let order = &self.agent_manual_order.order;
+        let Some(row) = rows.get(tree_insert_idx) else {
+            return order.len();
+        };
+        let pos = match row {
+            crate::ui::AgentPanelRow::Agent(entry) => order
+                .iter()
+                .position(|e| matches!(e, ManualEntry::Pane(p) if *p == entry.pane_id)),
+            crate::ui::AgentPanelRow::LineSplit { id, .. } => order
+                .iter()
+                .position(|e| matches!(e, ManualEntry::LineSplit { id: oid, .. } if oid == id)),
+        };
+        pos.unwrap_or(order.len())
+    }
+
     /// Reconcile the client-only Panes-section order with the live set of
     /// non-agent panes across all workspaces. Called from the compute_view
     /// mutation phase so render stays pure.
@@ -1488,13 +1515,24 @@ impl AppState {
         self.cycle_agent_entry(false);
     }
 
+    /// Visible agent panes in tree order (agents only, collapsed descendants
+    /// excluded), used for keyboard navigation and numeric focus so navigation
+    /// skips collapsed subtrees exactly as the panel shows them.
+    fn visible_agent_targets(&self) -> Vec<(usize, crate::layout::PaneId)> {
+        crate::ui::agent_panel_rows(self)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::ui::AgentPanelRow::Agent(entry) => Some((entry.ws_idx, entry.pane_id)),
+                crate::ui::AgentPanelRow::LineSplit { .. } => None,
+            })
+            .collect()
+    }
+
     pub fn focus_agent_entry(&mut self, idx: usize) -> bool {
-        let entries = crate::ui::agent_panel_entries(self);
-        let Some(target) = entries.get(idx) else {
+        let targets = self.visible_agent_targets();
+        let Some(&(ws_idx, pane_id)) = targets.get(idx) else {
             return false;
         };
-        let ws_idx = target.ws_idx;
-        let pane_id = target.pane_id;
         // Scroll math tracks the full row list (agents + line-splits), so map the
         // agent to its row index for ensure-visible.
         let row_idx = crate::ui::agent_panel_row_index_of_pane(self, pane_id).unwrap_or(idx);
@@ -1513,8 +1551,8 @@ impl AppState {
     }
 
     fn cycle_agent_entry(&mut self, forward: bool) {
-        let entries = crate::ui::agent_panel_entries(self);
-        if entries.is_empty() {
+        let targets = self.visible_agent_targets();
+        if targets.is_empty() {
             return;
         }
 
@@ -1523,13 +1561,13 @@ impl AppState {
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
         let current_idx =
-            focused.and_then(|pane_id| entries.iter().position(|entry| entry.pane_id == pane_id));
+            focused.and_then(|pane_id| targets.iter().position(|(_, target)| *target == pane_id));
         let target_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % entries.len(),
-            (Some(0), false) => entries.len() - 1,
+            (Some(idx), true) => (idx + 1) % targets.len(),
+            (Some(0), false) => targets.len() - 1,
             (Some(idx), false) => idx - 1,
             (None, true) => 0,
-            (None, false) => entries.len() - 1,
+            (None, false) => targets.len() - 1,
         };
 
         self.focus_agent_entry(target_idx);

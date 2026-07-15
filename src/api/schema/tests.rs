@@ -569,6 +569,7 @@ fn worktree_request_and_response_round_trip() {
                 custom_status: None,
                 state_labels: HashMap::new(),
                 agent_session: None,
+                parent: None,
                 revision: 0,
             },
             worktree: WorktreeInfo {
@@ -971,6 +972,7 @@ fn create_response_round_trips_with_root_pane() {
                 custom_status: None,
                 state_labels: HashMap::new(),
                 agent_session: None,
+                parent: None,
                 revision: 0,
             },
         },

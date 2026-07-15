@@ -140,6 +140,16 @@ You can place that agent in a specific workspace or tab:
 herdr agent start docs --workspace w1 --tab w1:t1 -- claude
 ```
 
+### Spawn a child agent
+
+An agent can spawn helper agents and record itself as their parent with `--parent`. The target resolves the same way as other agent commands (agent name, terminal id, or pane id):
+
+```bash
+herdr agent start helper --parent w1:pC -- claude
+```
+
+The child is spawned as a split of the parent pane and nests under the parent in the agents panel, indented one level, in every sort mode (grouped, priority, manual). A parent row gains a third summary line, for example `Subagents - 2 idle 3 blocked`, aggregating the state of its direct children. Click the `▾`/`▸` glyph on a parent row to collapse or expand its subtree; the collapse state is remembered across restarts. The parent link itself survives restart and closing a parent promotes its children to top-level agents. `--parent` cannot be combined with `--workspace` or `--tab`.
+
 Use `herdr pane ...` commands for ordinary terminals, servers, tests, shells, and low-level terminal input. For example, use `pane split` and `pane run` for `cargo test`, not `agent start`, unless that terminal is intentionally being treated as an agent target.
 
 ## Attach directly to an agent

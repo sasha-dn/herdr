@@ -269,12 +269,12 @@ fn matched_rule_region_preview<'a>(
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
-        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
+        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--parent TARGET] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
         return Ok(2);
     };
 
     let Some(separator) = args.iter().position(|arg| arg == "--") else {
-        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
+        eprintln!("usage: herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--parent TARGET] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>");
         return Ok(2);
     };
     if separator == args.len() - 1 {
@@ -285,6 +285,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let mut cwd = None;
     let mut workspace_id = None;
     let mut tab_id = None;
+    let mut parent = None;
     let mut split = None;
     let mut focus = false;
     let mut env = HashMap::new();
@@ -314,6 +315,14 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                     return Ok(2);
                 };
                 tab_id = Some(super::normalize_tab_id(value));
+                index += 2;
+            }
+            "--parent" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --parent");
+                    return Ok(2);
+                };
+                parent = Some(value.clone());
                 index += 2;
             }
             "--split" => {
@@ -362,6 +371,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             workspace_id,
             tab_id,
             split,
+            parent,
             focus,
             argv: args[separator + 1..].to_vec(),
             env,

@@ -217,12 +217,14 @@ herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> --status <idle|working|blocked|unknown> [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
+herdr agent start <name> [--cwd PATH] [--workspace ID] [--tab ID] [--parent TARGET] [--split right|down] [--env KEY=VALUE] [--focus|--no-focus] -- <argv...>
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 ```
 
 Agent targets can be terminal IDs, unique agent names, detected or reported agent labels, or legacy pane IDs. Names and labels are agent identities. Terminal IDs and legacy pane IDs are low-level escape hatches.
+
+`agent start --parent <target>` spawns the new agent as a split of an existing agent pane (resolved with the same target rules) and records it as that agent's parent. The child then nests under its parent in the agents panel across every sort mode. `--parent` cannot be combined with `--workspace` or `--tab`, and errors if the target does not resolve to an agent pane. The parent link is set only at spawn time; there is no reparenting command.
 
 `agent read` reads the resolved terminal stream. `agent send` writes literal text to that stream. `agent get`, `agent focus`, `agent wait`, and `agent attach` require the resolved terminal to have agent identity. `agent rename` can assign that identity.
 

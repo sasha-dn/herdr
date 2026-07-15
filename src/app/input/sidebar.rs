@@ -698,6 +698,38 @@ impl AppState {
         Some((body, areas))
     }
 
+    /// The stable public pane id of a collapse/expand glyph under `(col, row)`,
+    /// if the pointer is on a parent agent row's glyph. Applies in every sort
+    /// mode. Returns `None` otherwise.
+    pub(super) fn agent_panel_collapse_toggle_at(&self, col: u16, row: u16) -> Option<String> {
+        if self.sidebar_collapsed {
+            return None;
+        }
+        let (body, areas) = self.agent_panel_row_areas_at()?;
+        let rows = crate::ui::agent_panel_rows(self);
+        for area in &areas {
+            // The glyph sits on the first line of the row.
+            if row != area.y {
+                continue;
+            }
+            if let crate::ui::AgentPanelRow::Agent(entry) = &rows[area.row_idx] {
+                if !entry.has_children {
+                    return None;
+                }
+                let glyph_col = body.x.saturating_add(
+                    (entry.depth as u16).saturating_mul(crate::ui::AGENT_TREE_INDENT as u16),
+                );
+                if col == glyph_col {
+                    let ws = self.workspaces.get(entry.ws_idx)?;
+                    let number = ws.public_pane_number(entry.pane_id)?;
+                    return Some(crate::workspace::public_pane_id_for_number(&ws.id, number));
+                }
+            }
+            return None;
+        }
+        None
+    }
+
     pub(super) fn agent_detail_target_at(
         &self,
         row: u16,

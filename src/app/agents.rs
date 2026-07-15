@@ -114,6 +114,48 @@ impl App {
             });
         }
 
+        // Resolve the optional `--parent` target up front. A parent both drives
+        // placement (the child is spawned as a split of the parent pane) and is
+        // recorded as a stable parent link on the new pane. It is mutually
+        // exclusive with explicit `--workspace`/`--tab` placement.
+        let parent_placement = if let Some(parent_target) = params.parent.as_deref() {
+            if params.workspace_id.is_some() || params.tab_id.is_some() {
+                return Err(AgentStartError::ParentPlacementConflict);
+            }
+            let resolved = self.resolve_terminal_target(parent_target).map_err(|_| {
+                AgentStartError::ParentNotFound {
+                    target: parent_target.to_string(),
+                }
+            })?;
+            let parent_ws = self.state.workspaces.get(resolved.ws_idx).ok_or_else(|| {
+                AgentStartError::ParentNotFound {
+                    target: parent_target.to_string(),
+                }
+            })?;
+            let is_agent = parent_ws
+                .pane_state(resolved.pane_id)
+                .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+                .is_some_and(|terminal| terminal.is_agent_terminal());
+            let pane_number = parent_ws.public_pane_number(resolved.pane_id);
+            match (is_agent, pane_number) {
+                (true, Some(pane_number)) => Some((
+                    resolved.ws_idx,
+                    resolved.pane_id,
+                    crate::pane::PaneParentRef {
+                        workspace_id: parent_ws.id.clone(),
+                        pane_number,
+                    },
+                )),
+                _ => {
+                    return Err(AgentStartError::ParentNotFound {
+                        target: parent_target.to_string(),
+                    })
+                }
+            }
+        } else {
+            None
+        };
+
         let cwd = params
             .cwd
             .map(PathBuf::from)
@@ -123,7 +165,19 @@ impl App {
         let focus = params.focus;
         let (rows, cols) = self.state.estimate_pane_size();
 
-        let (ws_idx, tab_idx, pane_id) = if let Some(tab_id) = params.tab_id {
+        let (ws_idx, tab_idx, pane_id) = if let Some((parent_ws_idx, parent_pane_id, _)) =
+            parent_placement.as_ref()
+        {
+            self.spawn_agent_split(
+                *parent_ws_idx,
+                *parent_pane_id,
+                params.split.unwrap_or(SplitDirection::Right),
+                cwd,
+                &argv,
+                extra_env,
+                focus,
+            )?
+        } else if let Some(tab_id) = params.tab_id {
             let (ws_idx, tab_idx) =
                 self.parse_tab_id(&tab_id)
                     .ok_or_else(|| AgentStartError::TargetNotFound {
@@ -195,6 +249,16 @@ impl App {
         };
         terminal.set_agent_name(name.clone());
         terminal.set_manual_label(name);
+        if let Some((_, _, parent_ref)) = parent_placement {
+            if let Some(pane_state) = self
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.pane_state_mut(pane_id))
+            {
+                pane_state.parent = Some(parent_ref);
+            }
+        }
         self.state.mark_session_dirty();
 
         let agent = self
@@ -224,6 +288,14 @@ impl App {
             AgentStartError::PlacementConflict => crate::api::schema::ErrorBody {
                 code: "agent_placement_conflict".into(),
                 message: "--tab must belong to --workspace".into(),
+            },
+            AgentStartError::ParentNotFound { target } => crate::api::schema::ErrorBody {
+                code: "agent_parent_not_found".into(),
+                message: format!("agent parent target {target} not found"),
+            },
+            AgentStartError::ParentPlacementConflict => crate::api::schema::ErrorBody {
+                code: "agent_parent_placement_conflict".into(),
+                message: "--parent cannot be combined with --workspace or --tab".into(),
             },
             AgentStartError::SpawnFailed(message) => crate::api::schema::ErrorBody {
                 code: "agent_start_failed".into(),
@@ -433,6 +505,7 @@ impl App {
             focused: pane.focused,
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
+            parent: pane.parent,
             revision: pane.revision,
         })
     }
@@ -458,6 +531,10 @@ pub(super) enum AgentStartError {
         target: String,
     },
     PlacementConflict,
+    ParentNotFound {
+        target: String,
+    },
+    ParentPlacementConflict,
     SpawnFailed(String),
     DuplicateName {
         name: String,

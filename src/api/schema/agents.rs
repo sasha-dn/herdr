@@ -40,6 +40,11 @@ pub struct AgentStartParams {
     pub tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SplitDirection>,
+    /// Target of an existing agent pane (terminal id, public pane id like
+    /// `"w1:p2"`, or agent name). The new agent is spawned as a split of that
+    /// pane and records it as its parent in the agents-panel tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     #[serde(default)]
     pub focus: bool,
     pub argv: Vec<String>,
@@ -75,6 +80,10 @@ pub struct AgentInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
+    /// Public pane id (e.g. `"w1:p2"`) of this agent's parent, when it was
+    /// started as a child with `--parent`. Absent for root agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub revision: u64,
 }
 

@@ -480,6 +480,7 @@ fn restore_tab(
 
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
+        let saved_parent = saved_pane.and_then(|p| p.parent.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
@@ -550,7 +551,9 @@ fn restore_tab(
             ) {
                 terminal.set_persisted_agent_session(session);
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane_state = PaneState::new(terminal_id);
+            pane_state.parent = saved_parent.clone();
+            panes.insert(*id, pane_state);
             terminals.push(terminal);
             continue;
         }
@@ -643,7 +646,9 @@ fn restore_tab(
                 ) {
                     terminal.set_persisted_agent_session(session);
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let mut pane_state = PaneState::new(terminal_id.clone());
+                pane_state.parent = saved_parent.clone();
+                panes.insert(*id, pane_state);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -1180,6 +1185,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            parent: None,
                         },
                     )]),
                     zoomed: false,
@@ -1194,6 +1200,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1262,6 +1269,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                parent: None,
                             },
                         ),
                         (
@@ -1272,6 +1280,7 @@ mod tests {
                                 agent_name: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                parent: None,
                             },
                         ),
                     ]),
@@ -1287,6 +1296,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1328,6 +1338,7 @@ mod tests {
                     agent_name: None,
                     agent_session: None,
                     launch_argv: None,
+                    parent: None,
                 },
             )
         };
@@ -1342,6 +1353,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            parent: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1396,6 +1408,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1498,6 +1511,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            parent: None,
                         },
                     )]),
                     zoomed: false,
@@ -1512,6 +1526,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1615,6 +1630,7 @@ mod tests {
                                 value: "removed-worktree-session".into(),
                             }),
                             launch_argv: None,
+                            parent: None,
                         },
                     )]),
                     zoomed: false,
@@ -1629,6 +1645,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1758,6 +1775,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                parent: None,
             },
         );
         let history = SessionHistorySnapshot {
@@ -1801,6 +1819,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,

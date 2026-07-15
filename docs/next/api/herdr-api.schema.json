@@ -723,6 +723,13 @@
             "pane_id": {
               "type": "string"
             },
+            "parent": {
+              "description": "Public pane id (e.g. `\"w1:p2\"`) of this pane's parent agent, when it was\nstarted as a child with `--parent`. Absent for root agents.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
@@ -1033,6 +1040,13 @@
             },
             "name": {
               "type": "string"
+            },
+            "parent": {
+              "description": "Target of an existing agent pane (terminal id, public pane id like\n`\"w1:p2\"`, or agent name). The new agent is spawned as a split of that\npane and records it as its parent in the agents-panel tree.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "split": {
               "anyOf": [
@@ -5046,6 +5060,13 @@
             "pane_id": {
               "type": "string"
             },
+            "parent": {
+              "description": "Public pane id (e.g. `\"w1:p2\"`) of this agent's parent, when it was\nstarted as a child with `--parent`. Absent for root agents.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
@@ -6197,6 +6218,13 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "parent": {
+              "description": "Public pane id (e.g. `\"w1:p2\"`) of this pane's parent agent, when it was\nstarted as a child with `--parent`. Absent for root agents.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "revision": {
               "format": "uint64",

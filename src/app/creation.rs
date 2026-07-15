@@ -377,6 +377,12 @@ impl App {
             custom_status: presentation.custom_status,
             state_labels: presentation.state_labels,
             agent_session: terminal_agent_session_info(terminal),
+            parent: pane.parent.as_ref().map(|parent| {
+                crate::workspace::public_pane_id_for_number(
+                    &parent.workspace_id,
+                    parent.pane_number,
+                )
+            }),
             revision: terminal.revision,
         })
     }
