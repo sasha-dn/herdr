@@ -1564,7 +1564,7 @@ mod tests {
             app.state
                 .agent_manual_order
                 .to_public_keys(&app.state.workspaces),
-            app.state.pane_section_order.to_refs(),
+            app.state.pane_section_order.to_entry_keys(),
         );
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 1);
         assert!(matches!(

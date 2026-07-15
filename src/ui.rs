@@ -53,7 +53,7 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 #[cfg(test)]
-pub(crate) use self::sidebar::workspace_drop_indicator_row;
+pub(crate) use self::sidebar::sidebar_pane_section_entries;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{
     copy_feedback_rect, render_config_diagnostic, render_copy_feedback, render_toast_notification,
@@ -83,9 +83,10 @@ pub(crate) use self::{
         collapsed_sidebar_toggle_rect, compute_agent_panel_row_areas,
         compute_pane_section_row_areas, compute_workspace_card_areas, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, normalized_workspace_scroll, pane_section_body_rect,
-        pane_section_rect, pane_section_scroll_metrics, pane_section_scrollbar_rect,
-        sidebar_pane_section_divider_rect, sidebar_pane_section_entries,
-        sidebar_section_divider_rect, sidebar_shows_pane_section, workspace_drop_slots,
+        pane_section_rect, pane_section_row_index_of_pane, pane_section_scroll_metrics,
+        pane_section_scrollbar_rect, pane_section_split_button_rect,
+        sidebar_pane_section_divider_rect, sidebar_section_divider_rect,
+        sidebar_shows_pane_section, workspace_drop_indicator_row, workspace_drop_slots,
         workspace_group_chevron_rect, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
         workspace_parent_group_state, AgentPanelEntry,
