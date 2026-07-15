@@ -490,6 +490,7 @@ fn restore_tab(
         let saved_managed_agent = saved_pane
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
+        let saved_parent = saved_pane.and_then(|p| p.parent.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
@@ -563,7 +564,9 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane_state = PaneState::new(terminal_id);
+            pane_state.parent = saved_parent.clone();
+            panes.insert(*id, pane_state);
             terminals.push(terminal);
             continue;
         }
@@ -662,7 +665,9 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let mut pane_state = PaneState::new(terminal_id.clone());
+                pane_state.parent = saved_parent.clone();
+                panes.insert(*id, pane_state);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -1200,6 +1205,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            parent: None,
                         },
                     )]),
                     zoomed: false,
@@ -1214,6 +1220,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1285,6 +1292,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                parent: None,
                             },
                         ),
                         (
@@ -1296,6 +1304,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                parent: None,
                             },
                         ),
                     ]),
@@ -1311,6 +1320,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1353,6 +1363,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
+                    parent: None,
                 },
             )
         };
@@ -1368,6 +1379,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            parent: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1422,6 +1434,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1524,6 +1537,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            parent: None,
                         },
                     )]),
                     zoomed: false,
@@ -1538,6 +1552,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1642,6 +1657,7 @@ mod tests {
                             }),
                             launch_argv: None,
                             managed_agent_kind: None,
+                            parent: None,
                         },
                     )]),
                     zoomed: false,
@@ -1656,6 +1672,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1785,6 +1802,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                parent: None,
             },
         );
         let history = SessionHistorySnapshot {
@@ -1832,6 +1850,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,

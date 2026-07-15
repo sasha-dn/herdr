@@ -170,6 +170,11 @@ pub struct AgentStartParams {
     /// Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Target of an existing agent pane (terminal id, public pane id like
+    /// `"w1:p2"`, or agent name). Recorded as this agent's parent in the
+    /// agents-panel tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -219,6 +224,10 @@ pub struct AgentInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
+    /// Public pane id (e.g. `"w1:p2"`) of this agent's parent, when it was
+    /// started as a child with `--parent`. Absent for root agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub revision: u64,
 }
 

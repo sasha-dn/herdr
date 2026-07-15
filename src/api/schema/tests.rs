@@ -71,6 +71,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             pane_id: "w1:p2".into(),
             args: vec!["--no-session".into()],
             timeout_ms: Some(30_000),
+            parent: None,
         }),
     };
     let start_json = serde_json::to_value(&start).unwrap();
@@ -748,6 +749,7 @@ fn worktree_request_and_response_round_trip() {
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
+                parent: None,
                 revision: 0,
             },
             worktree: WorktreeInfo {
@@ -1176,6 +1178,7 @@ fn create_response_round_trips_with_root_pane() {
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
+                parent: None,
                 revision: 0,
             },
         },

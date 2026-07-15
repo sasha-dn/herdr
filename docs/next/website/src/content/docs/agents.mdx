@@ -136,6 +136,16 @@ herdr pane report-metadata w1:p1 \
 
 Agent sidebar rows can also opt into `terminal_title` or `terminal_title_stripped`; neither appears in the default rows. The first shows the latest safety-normalized OSC 0/2 terminal title. The second removes one recognized leading activity or spinner glyph and following whitespace. Herdr owns these values on the server; they are ephemeral across a cold restart and remain independent of metadata titles and semantic agent state. Spinner animation can therefore update the raw title without producing a pane update when the stripped text stays the same.
 
+## Spawn a child agent
+
+An agent can spawn helper agents and record itself as their parent with `--parent`. The target resolves the same way as other agent commands (agent name, terminal id, or pane id):
+
+```bash
+herdr agent start helper --kind claude --pane w1:p2 --parent w1:pC
+```
+
+The child nests under the parent in the agents panel, indented one level, in every sort mode (grouped, priority, manual). A parent row gains a third summary line, for example `Subagents - 2 idle 3 blocked`, aggregating the state of its direct children. Click the `▾`/`▸` glyph on a parent row to collapse or expand its subtree; the collapse state is remembered across restarts. The parent link itself survives restart, and closing a parent promotes its children to top-level agents.
+
 ## Attach directly to an agent
 
 Attach your current terminal to one agent terminal instead of the full Herdr UI:

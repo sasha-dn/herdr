@@ -170,6 +170,40 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&params.pane_id) else {
             return Err(AgentStartError::TargetNotFound(params.pane_id));
         };
+
+        // Resolve the optional `--parent` target up front. It is recorded as a
+        // stable parent link on the target pane once the agent starts, driving
+        // the agents-panel tree; it does not affect where the pane itself lives.
+        let parent_ref = if let Some(parent_target) = params.parent.as_deref() {
+            let resolved = self.resolve_terminal_target(parent_target).map_err(|_| {
+                AgentStartError::ParentNotFound {
+                    target: parent_target.to_string(),
+                }
+            })?;
+            let parent_ws = self.state.workspaces.get(resolved.ws_idx).ok_or_else(|| {
+                AgentStartError::ParentNotFound {
+                    target: parent_target.to_string(),
+                }
+            })?;
+            let is_agent = parent_ws
+                .pane_state(resolved.pane_id)
+                .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+                .is_some_and(|terminal| terminal.is_agent_terminal());
+            let pane_number = parent_ws.public_pane_number(resolved.pane_id);
+            match (is_agent, pane_number) {
+                (true, Some(pane_number)) => Some(crate::pane::PaneParentRef {
+                    workspace_id: parent_ws.id.clone(),
+                    pane_number,
+                }),
+                _ => {
+                    return Err(AgentStartError::ParentNotFound {
+                        target: parent_target.to_string(),
+                    })
+                }
+            }
+        } else {
+            None
+        };
         let terminal_id = self
             .state
             .workspaces
@@ -217,6 +251,16 @@ impl App {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));
         }
+        if let Some(parent_ref) = parent_ref {
+            if let Some(pane_state) = self
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|ws| ws.pane_state_mut(pane_id))
+            {
+                pane_state.parent = Some(parent_ref);
+            }
+        }
         self.state.mark_session_dirty();
         self.schedule_session_save();
 
@@ -262,6 +306,10 @@ impl App {
             AgentStartError::InputFailed(message) => crate::api::schema::ErrorBody {
                 code: "agent_start_input_failed".into(),
                 message,
+            },
+            AgentStartError::ParentNotFound { target } => crate::api::schema::ErrorBody {
+                code: "agent_parent_not_found".into(),
+                message: format!("agent parent target {target} not found"),
             },
             AgentStartError::DuplicateName { name, candidates } => crate::api::schema::ErrorBody {
                 code: "agent_name_taken".into(),
@@ -392,6 +440,7 @@ impl App {
             state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
+            parent: pane.parent,
             revision: pane.revision,
         })
     }
@@ -449,6 +498,9 @@ pub(super) enum AgentStartError {
     TargetBusy(String),
     TargetUnavailable(String),
     InputFailed(String),
+    ParentNotFound {
+        target: String,
+    },
     DuplicateName {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,

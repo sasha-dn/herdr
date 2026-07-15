@@ -486,6 +486,7 @@ mod tests {
             sidebar_section_split: None,
             sidebar_pane_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             pane_section_order: None,
         }

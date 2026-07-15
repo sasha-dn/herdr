@@ -494,6 +494,7 @@ impl App {
             sidebar_section_split,
             sidebar_pane_section_split,
             collapsed_space_keys,
+            collapsed_agent_keys,
             agent_manual_order,
             pane_section_order,
         ) = if no_session {
@@ -505,6 +506,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 state::AgentManualOrder::default(),
                 state::PaneSectionOrder::default(),
@@ -545,6 +547,7 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.sidebar_pane_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_agent_keys,
                     state::AgentManualOrder::default(),
                     state::PaneSectionOrder::default(),
                 )
@@ -567,6 +570,7 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.sidebar_pane_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
+                    snap.collapsed_agent_keys,
                     agent_manual_order,
                     pane_section_order,
                 )
@@ -580,6 +584,7 @@ impl App {
                 state::SidebarWidthSource::ConfigDefault,
                 0.5_f32,
                 0.5_f32,
+                std::collections::HashSet::new(),
                 std::collections::HashSet::new(),
                 state::AgentManualOrder::default(),
                 state::PaneSectionOrder::default(),
@@ -677,6 +682,7 @@ impl App {
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            collapsed_agent_keys,
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -994,6 +1000,7 @@ impl App {
             app.state.sidebar_pane_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.collapsed_agent_keys = snapshot.collapsed_agent_keys.clone();
         app.state.agent_manual_order = restore_agent_manual_order(snapshot, &app.state.workspaces);
         app.state.pane_section_order = restore_pane_section_order(snapshot, &app.state.workspaces);
         app.state.mode = if app.state.active.is_some() {
@@ -4895,6 +4902,7 @@ mod tests {
                 pane_id,
                 args: Vec::new(),
                 timeout_ms: Some(1_000),
+                parent: None,
             }),
         });
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
@@ -4937,6 +4945,7 @@ mod tests {
                 pane_id: pane_id.clone(),
                 args: Vec::new(),
                 timeout_ms: Some(4_000),
+                parent: None,
             }),
         };
         let response = app.handle_api_request(request());
@@ -4974,6 +4983,85 @@ mod tests {
             app.state.terminals[&terminal_id].agent_name.as_deref(),
             Some("worker")
         );
+    }
+
+    #[tokio::test]
+    async fn agent_start_with_parent_records_link_and_rejects_bad_targets() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("agent-tree");
+        let child_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let root_pane = workspace.tabs[0]
+            .panes
+            .keys()
+            .find(|id| **id != child_pane)
+            .copied()
+            .unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mut receivers = Vec::new();
+        for pane_id in [root_pane, child_pane] {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let (runtime, receiver) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 8);
+            app.terminal_runtimes.insert(terminal_id, runtime);
+            receivers.push(receiver);
+        }
+
+        let root_pane_id = app.pane_info(0, root_pane).unwrap().pane_id;
+        let child_pane_id = app.pane_info(0, child_pane).unwrap().pane_id;
+
+        let start = |app: &mut crate::app::App, name: &str, pane_id: String, parent: Option<String>| {
+            let response = app.handle_api_request(crate::api::schema::Request {
+                id: format!("req_{name}"),
+                method: crate::api::schema::Method::AgentStart(
+                    crate::api::schema::AgentStartParams {
+                        name: name.into(),
+                        kind: "pi".into(),
+                        pane_id,
+                        args: Vec::new(),
+                        timeout_ms: Some(4_000),
+                        parent,
+                    },
+                ),
+            });
+            serde_json::from_str::<serde_json::Value>(&response).unwrap()
+        };
+
+        // Root agent.
+        let root_resp = start(&mut app, "root", root_pane_id.clone(), None);
+        assert_eq!(root_resp["result"]["type"], "agent_started");
+
+        // Child agent linked to the root.
+        let child_resp = start(
+            &mut app,
+            "child",
+            child_pane_id.clone(),
+            Some(root_pane_id.clone()),
+        );
+        assert_eq!(child_resp["result"]["type"], "agent_started");
+        assert_eq!(child_resp["result"]["agent"]["parent"], root_pane_id);
+
+        // The child's PaneState records the parent link.
+        let has_parent_link = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .any(|pane| pane.parent.is_some());
+        assert!(has_parent_link, "child pane stores a parent link");
+
+        // Unresolvable parent target errors clearly and starts nothing new.
+        let bad = start(&mut app, "orphan", root_pane_id.clone(), Some("w9:pZ".into()));
+        assert_eq!(bad["error"]["code"], "agent_parent_not_found");
+
+        let runtimes: Vec<_> = app.terminal_runtimes.drain().collect();
+        for (_terminal_id, runtime) in runtimes {
+            runtime.shutdown();
+        }
     }
 
     #[test]
@@ -6757,6 +6845,7 @@ last_pane = "prefix+tab"
             sidebar_section_split: None,
             sidebar_pane_section_split: None,
             collapsed_space_keys: Default::default(),
+            collapsed_agent_keys: Default::default(),
             agent_manual_order: None,
             pane_section_order: None,
         };

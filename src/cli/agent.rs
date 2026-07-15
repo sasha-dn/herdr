@@ -274,7 +274,7 @@ fn matched_rule_region_preview<'a>(
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
-        eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
+        eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--parent TARGET] [--timeout MS] [-- <agent-args...>]");
         return Ok(2);
     };
     let separator = args
@@ -284,6 +284,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let mut kind = None;
     let mut pane_id = None;
     let mut timeout_ms = None;
+    let mut parent = None;
     let mut index = 1;
     while index < separator {
         match args[index].as_str() {
@@ -312,6 +313,14 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                     Ok(timeout_ms) => Some(timeout_ms),
                     Err(exit_code) => return Ok(exit_code),
                 };
+                index += 2;
+            }
+            "--parent" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --parent");
+                    return Ok(2);
+                };
+                parent = Some(value.clone());
                 index += 2;
             }
             other => {
@@ -363,6 +372,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 pane_id: pane_id.clone(),
                 args: agent_args.clone(),
                 timeout_ms,
+                parent: parent.clone(),
             }),
         })?;
         if response.get("error").is_none() {
