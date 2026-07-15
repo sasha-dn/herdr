@@ -654,12 +654,15 @@ pub struct WorkspaceCardArea {
     pub indented: bool,
 }
 
-/// Screen placement of one visible Tabs-section row (a two-line tab entry).
-/// `order_idx` is the flat index into `TabSectionOrder`. Client-only.
+/// Screen placement of one visible Panes-section row (a two-line pane entry).
+/// `order_idx` is the flat index into `PaneSectionOrder`; `tab_idx` is the pane's
+/// containing tab (used for the name fallback) and `pane_id` addresses the pane
+/// itself for focus and rename. Client-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TabSectionRowArea {
+pub struct PaneSectionRowArea {
     pub ws_idx: usize,
     pub tab_idx: usize,
+    pub pane_id: crate::layout::PaneId,
     pub order_idx: usize,
     pub rect: Rect,
 }
@@ -819,7 +822,7 @@ pub struct ViewState {
     pub layout: ViewLayout,
     pub sidebar_rect: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
-    pub tab_section_row_areas: Vec<TabSectionRowArea>,
+    pub pane_section_row_areas: Vec<PaneSectionRowArea>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -1184,45 +1187,49 @@ impl AgentManualOrder {
     }
 }
 
-/// Stable reference to a single tab, independent of its position within a
-/// workspace. Tabs are addressed by their owning workspace id plus their stable
-/// public tab number (which survives reorders and restore), so a `TabRef` can be
-/// persisted and rebuilt directly without a remap. Client-only presentation
-/// state; never enters the server/runtime protocol.
+/// Stable reference to a single non-agent pane, independent of its position
+/// within a workspace. Panes are addressed by their owning workspace id plus
+/// their stable public pane number (which survives reorders and the PaneId remap
+/// on restore), so a `PaneSectionRef` can be persisted and rebuilt directly
+/// without a remap. Client-only presentation state; never enters the
+/// server/runtime protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TabRef {
+pub(crate) struct PaneSectionRef {
     pub(crate) workspace_id: String,
-    pub(crate) tab_number: usize,
+    pub(crate) pane_number: usize,
 }
 
-/// Flat, client-only manual ordering of non-agent tabs for the sidebar Tabs
+/// Flat, client-only manual ordering of non-agent panes for the sidebar Panes
 /// section.
 ///
 /// This is TUI presentation state: it never enters the server/runtime protocol
-/// and never changes the real tab order inside any workspace. `order` drives the
-/// display order across all spaces, `known` tracks which tabs have already been
-/// placed (so genuinely new tabs get the placement rule), and `seeded` records
+/// and never changes the real pane order inside any workspace. `order` drives the
+/// display order across all spaces, `known` tracks which panes have already been
+/// placed (so genuinely new panes get the placement rule), and `seeded` records
 /// whether the natural order has been captured at least once.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TabSectionOrder {
-    pub(crate) order: Vec<TabRef>,
-    pub(crate) known: std::collections::HashSet<TabRef>,
+pub(crate) struct PaneSectionOrder {
+    pub(crate) order: Vec<PaneSectionRef>,
+    pub(crate) known: std::collections::HashSet<PaneSectionRef>,
     pub(crate) seeded: bool,
 }
 
-impl TabSectionOrder {
-    /// Rebuild a tab-section order from persisted references, keeping only those
+impl PaneSectionOrder {
+    /// Rebuild a pane-section order from persisted references, keeping only those
     /// whose workspace still exists. `seeded` is set because a snapshot was
-    /// present, so reconcile treats later arrivals as genuinely new tabs rather
+    /// present, so reconcile treats later arrivals as genuinely new panes rather
     /// than reseeding.
-    pub(crate) fn from_refs(refs: Vec<TabRef>, workspaces: &[crate::workspace::Workspace]) -> Self {
+    pub(crate) fn from_refs(
+        refs: Vec<PaneSectionRef>,
+        workspaces: &[crate::workspace::Workspace],
+    ) -> Self {
         let live_ids: std::collections::HashSet<&str> =
             workspaces.iter().map(|ws| ws.id.as_str()).collect();
         let mut order = Vec::new();
         let mut known = std::collections::HashSet::new();
-        for tab_ref in refs {
-            if live_ids.contains(tab_ref.workspace_id.as_str()) && known.insert(tab_ref.clone()) {
-                order.push(tab_ref);
+        for pane_ref in refs {
+            if live_ids.contains(pane_ref.workspace_id.as_str()) && known.insert(pane_ref.clone()) {
+                order.push(pane_ref);
             }
         }
         Self {
@@ -1233,7 +1240,7 @@ impl TabSectionOrder {
     }
 
     /// Snapshot the current order as plain references for persistence.
-    pub(crate) fn to_refs(&self) -> Vec<TabRef> {
+    pub(crate) fn to_refs(&self) -> Vec<PaneSectionRef> {
         self.order.clone()
     }
 }
@@ -1405,12 +1412,12 @@ pub(crate) enum DragTarget {
         source: ManualEntryRef,
         insert_idx: Option<usize>,
     },
-    /// Reorder of a non-agent tab within the flat, client-only Tabs-section
+    /// Reorder of a non-agent pane within the flat, client-only Panes-section
     /// ordering. Cross-workspace moves are allowed; this only changes the
     /// sidebar's visual order, never the real tab order inside any workspace.
-    /// `insert_idx` is a flat index into the tab-section order.
-    TabSectionReorder {
-        source: TabRef,
+    /// `insert_idx` is a flat index into the pane-section order.
+    PaneSectionReorder {
+        source: PaneSectionRef,
         insert_idx: Option<usize>,
     },
     WorkspaceListScrollbar {
@@ -1419,7 +1426,7 @@ pub(crate) enum DragTarget {
     AgentPanelScrollbar {
         grab_row_offset: u16,
     },
-    TabSectionScrollbar {
+    PaneSectionScrollbar {
         grab_row_offset: u16,
     },
     PaneSplit {
@@ -1443,7 +1450,7 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     /// Drag of one of the two sidebar section dividers. `index` selects which
-    /// divider: 0 = Spaces/Tabs, 1 = Tabs/Agents.
+    /// divider: 0 = Spaces/Panes, 1 = Panes/Agents.
     SidebarSectionDivider {
         index: usize,
     },
@@ -1473,8 +1480,8 @@ pub(crate) struct AgentPressState {
     pub start_row: u16,
 }
 
-pub(crate) struct TabSectionPressState {
-    pub entry: TabRef,
+pub(crate) struct PaneSectionPressState {
+    pub entry: PaneSectionRef,
     pub start_col: u16,
     pub start_row: u16,
 }
@@ -1726,8 +1733,8 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
-    /// Scroll offset (in flat order index) for the sidebar Tabs section.
-    pub tab_section_scroll: usize,
+    /// Scroll offset (in flat order index) for the sidebar Panes section.
+    pub pane_section_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1739,7 +1746,7 @@ pub struct AppState {
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
     pub(crate) agent_presses:
         std::collections::HashMap<crate::app::InputSourceId, AgentPressState>,
-    pub(crate) tab_section_press: Option<TabSectionPressState>,
+    pub(crate) pane_section_press: Option<PaneSectionPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -1773,8 +1780,8 @@ pub struct AppState {
     /// of three stacked bands: Spaces / Tabs / Agents).
     pub sidebar_section_split: f32,
     /// Ratio of the remaining sidebar height (below the Spaces band) allocated to
-    /// the Tabs section; the Agents section takes the rest.
-    pub sidebar_tabs_section_split: f32,
+    /// the Panes section; the Agents section takes the rest.
+    pub sidebar_pane_section_split: f32,
     pub agent_panel_sort: AgentPanelSort,
     pub status_indicators: crate::config::StatusIndicatorStyle,
     /// Transient session-wide projection override for the built-in Agents view.
@@ -1783,9 +1790,9 @@ pub struct AppState {
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
     /// Flat client-only manual ordering of agent panes (TUI presentation state).
     pub(crate) agent_manual_order: AgentManualOrder,
-    /// Flat client-only manual ordering of non-agent tabs for the Tabs section
+    /// Flat client-only manual ordering of non-agent panes for the Panes section
     /// (TUI presentation state).
-    pub(crate) tab_section_order: TabSectionOrder,
+    pub(crate) pane_section_order: PaneSectionOrder,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
     /// captures mouse while the focused pane app requests mouse reporting.
@@ -2147,7 +2154,7 @@ impl AppState {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
-            tab_section_scroll: 0,
+            pane_section_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,
@@ -2155,7 +2162,7 @@ impl AppState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
                 workspace_card_areas: Vec::new(),
-                tab_section_row_areas: Vec::new(),
+                pane_section_row_areas: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -2172,7 +2179,7 @@ impl AppState {
             workspace_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
             agent_presses: std::collections::HashMap::new(),
-            tab_section_press: None,
+            pane_section_press: None,
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -2201,14 +2208,14 @@ impl AppState {
             sidebar_collapsed: false,
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
-            sidebar_tabs_section_split: 0.5,
+            sidebar_pane_section_split: 0.5,
             agent_panel_sort: AgentPanelSort::Spaces,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             agent_view_override: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             agent_manual_order: AgentManualOrder::default(),
-            tab_section_order: TabSectionOrder::default(),
+            pane_section_order: PaneSectionOrder::default(),
             next_agent_state_change_seq: 0,
             mouse_capture: true,
             copy_on_select: true,
