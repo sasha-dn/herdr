@@ -159,6 +159,8 @@ resize_pane_up = "ctrl+shift+alt+up"
 resize_pane_right = "ctrl+shift+alt+right"
 ```
 
+`previous_pane` and `next_pane` cycle focus through the sidebar panes section, one entry per non-agent pane across all spaces. Focusing an entry switches to that pane's space and tab, exactly like clicking the row. Cycling wraps around and skips line-split dividers. They are unset by default; bind them with a modified chord such as `ctrl+shift+up` and `ctrl+shift+down`.
+
 Key strings accept plain keys, modifier combinations such as `ctrl+a`, `shift+n`, `alt+1`, `cmd+k`, and special keys such as `enter`, `tab`, `esc`, `left`, `right`, `up`, and `down`. Named punctuation such as `minus`, `comma`, `ampersand`, `plus`, and `backtick` is also accepted. Plain direct printable keys such as `n` are unsafe because they intercept typing; use `prefix+n` unless you intentionally want a direct binding. The `navigate_workspace_*` and `navigate_pane_*` fields are navigate-mode-only and may use plain keys such as `j` or `k`; they must not use `prefix+`, `esc`, `enter`, `tab`, `shift+tab`, `left`, `right`, or unmodified `1` through `9`. Left and right arrows are permanent aliases for pane-left and pane-right navigation. These navigate-mode shortcuts are independent from general action bindings such as `focus_pane_down = "prefix+j"`; when both use the same key, the navigate-mode shortcut wins while navigate mode is open. Alt, Cmd/Super, and punctuation with modifiers depend on your terminal and tmux settings.
 
 If you have old custom keybindings and want the new defaults, run `herdr config reset-keys`. Herdr backs up `config.toml`, removes `[keys]` and `[[keys.command]]`, and uses built-in v2 defaults after restart or `herdr server reload-config`.
@@ -305,7 +307,6 @@ Separators appear only between visible entries. Set `tab_bar_right_separator = "
 
 ### Outer terminal window title
 
-<<<<<<< HEAD
 Herdr emulates the terminals in its panes, so an `OSC 0`/`OSC 2` title written inside a pane stops at Herdr. Herdr writes its own title to the terminal it runs in, which is what window managers and terminal tab bars read:
 
 ```toml
@@ -384,9 +385,8 @@ rows = [
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
 `row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
-=======
+
 `confirm_close` controls whether closing a workspace asks for confirmation. `prompt_new_tab_name` controls whether new tabs ask for a label first.
->>>>>>> c9f1727b (refactor: hardcode agent-panel row rendering)
 
 Override the complete Agent layout for a known agent under `rows_by_agent`:
 
