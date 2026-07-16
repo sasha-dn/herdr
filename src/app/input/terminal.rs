@@ -1561,6 +1561,7 @@ mod tests {
             app.state.sidebar_pane_section_split,
             app.state.collapsed_space_keys.clone(),
             app.state.collapsed_agent_keys.clone(),
+            app.state.collapsed_line_split_keys.clone(),
             app.state
                 .agent_manual_order
                 .to_public_keys(&app.state.workspaces),

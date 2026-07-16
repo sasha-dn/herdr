@@ -34,6 +34,10 @@ pub struct SessionSnapshot {
     /// Optional for back-compat.
     #[serde(default)]
     pub collapsed_agent_keys: std::collections::HashSet<String>,
+    /// Section-namespaced keys of collapsed line-split dividers (TUI presentation
+    /// state). Optional for back-compat.
+    #[serde(default)]
+    pub collapsed_line_split_keys: std::collections::HashSet<String>,
     /// Flat manual agent ordering (TUI presentation state). Serialized by stable
     /// keys so it survives the PaneId remap on restore. Optional for back-compat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,6 +267,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     collapsed_agent_keys: std::collections::HashSet<String>,
     #[serde(default)]
+    collapsed_line_split_keys: std::collections::HashSet<String>,
+    #[serde(default)]
     agent_manual_order: Option<AgentManualOrderSnapshot>,
     #[serde(default)]
     pane_section_order: Option<PaneSectionOrderSnapshot>,
@@ -283,6 +289,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_pane_section_split: raw.sidebar_pane_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
         collapsed_agent_keys: raw.collapsed_agent_keys,
+        collapsed_line_split_keys: raw.collapsed_line_split_keys,
         agent_manual_order: raw.agent_manual_order,
         pane_section_order: raw.pane_section_order,
     })
@@ -353,6 +360,7 @@ pub fn capture(
     sidebar_pane_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
     collapsed_agent_keys: std::collections::HashSet<String>,
+    collapsed_line_split_keys: std::collections::HashSet<String>,
     agent_manual_order_keys: Vec<crate::app::state::ManualOrderEntryKey>,
     pane_section_order_keys: Vec<crate::app::state::PaneManualEntryKey>,
 ) -> SessionSnapshot {
@@ -411,6 +419,7 @@ pub fn capture(
         sidebar_pane_section_split: Some(sidebar_pane_section_split),
         collapsed_space_keys,
         collapsed_agent_keys,
+        collapsed_line_split_keys,
         agent_manual_order,
         pane_section_order,
     }
@@ -770,6 +779,7 @@ mod tests {
             state.sidebar_pane_section_split,
             state.collapsed_space_keys.clone(),
             state.collapsed_agent_keys.clone(),
+            state.collapsed_line_split_keys.clone(),
             state.agent_manual_order.to_public_keys(&state.workspaces),
             state.pane_section_order.to_entry_keys(),
         )
@@ -837,6 +847,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_agent_keys: std::collections::HashSet::new(),
+            collapsed_line_split_keys: std::collections::HashSet::new(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -861,6 +872,7 @@ mod tests {
             sidebar_pane_section_split: Some(0.6),
             collapsed_space_keys: Default::default(),
             collapsed_agent_keys: Default::default(),
+            collapsed_line_split_keys: Default::default(),
             agent_manual_order: None,
             pane_section_order: Some(PaneSectionOrderSnapshot {
                 entries: vec![
@@ -1207,6 +1219,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_agent_keys: std::collections::HashSet::new(),
+            collapsed_line_split_keys: std::collections::HashSet::new(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
@@ -1422,6 +1435,30 @@ mod tests {
         assert_eq!(snapshot.sidebar_width, Some(31));
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
         assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+    }
+
+    #[test]
+    fn capture_roundtrip_preserves_collapsed_line_split_keys() {
+        let mut state = state_with_workspaces(&["one"]);
+        state.collapsed_line_split_keys.insert("agents:2".into());
+        state.collapsed_line_split_keys.insert("panes:5".into());
+
+        let snapshot = capture_from_state(&state);
+        assert!(snapshot.collapsed_line_split_keys.contains("agents:2"));
+        assert!(snapshot.collapsed_line_split_keys.contains("panes:5"));
+
+        // Survives a JSON serialize/deserialize round trip.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let restored: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        assert!(restored.collapsed_line_split_keys.contains("agents:2"));
+        assert!(restored.collapsed_line_split_keys.contains("panes:5"));
+    }
+
+    #[test]
+    fn legacy_snapshot_without_collapsed_line_split_keys_defaults_empty() {
+        let json = r#"{"version":9,"workspaces":[],"active":null,"selected":0}"#;
+        let snapshot: SessionSnapshot = serde_json::from_str(json).unwrap();
+        assert!(snapshot.collapsed_line_split_keys.is_empty());
     }
 
     #[test]
@@ -1811,6 +1848,7 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_agent_keys: std::collections::HashSet::new(),
+            collapsed_line_split_keys: std::collections::HashSet::new(),
             agent_manual_order: None,
             sidebar_pane_section_split: None,
             pane_section_order: None,
