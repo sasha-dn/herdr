@@ -676,6 +676,102 @@ impl HeadlessServer {
                 needs_render = true;
                 needs_full_render = true;
                 needs_graphics_render = false;
+                crate::render_prof::event("full_render_cause.deferred_new_workspace");
+            }
+
+            if self.app.state.request_new_tab {
+                self.app.state.request_new_tab = false;
+                let label = self.app.state.requested_new_tab_name.take();
+                if let Err(error) = self.headless_tab_create("headless.tab.create", label) {
+                    error!(
+                        code = %error.code,
+                        message = %error.message,
+                        "failed to create tab"
+                    );
+                }
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_new_tab");
+            }
+
+            if self.app.state.request_undo_close {
+                self.app.state.request_undo_close = false;
+                if self.app.undo_last_close() {
+                    needs_render = true;
+                    needs_full_render = true;
+                    crate::render_prof::event("full_render_cause.deferred_undo_close");
+                }
+            }
+
+            if let Some(ws_idx) = self.app.state.request_new_linked_worktree.take() {
+                self.app.open_new_linked_worktree_dialog(ws_idx);
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+            }
+
+            if let Some(ws_idx) = self.app.state.request_open_existing_worktree.take() {
+                self.app.open_existing_worktree_dialog(ws_idx);
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+            }
+
+            if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
+                if let Err(error) = self.headless_workspace_create(
+                    "headless.workspace.create_cwd",
+                    Some(cwd.display().to_string()),
+                    None,
+                ) {
+                    error!(
+                        code = %error.code,
+                        message = %error.message,
+                        "failed to create workspace at requested cwd"
+                    );
+                    self.app.state.mode = app::Mode::Navigate;
+                }
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_workspace_cwd");
+            }
+
+            if let Some(ws_idx) = self.app.state.request_remove_linked_worktree.take() {
+                self.app.open_remove_linked_worktree_confirmation(ws_idx);
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
+            }
+
+            if self.app.state.request_submit_worktree_create {
+                self.app.state.request_submit_worktree_create = false;
+                self.app.submit_worktree_create_via_api();
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+            }
+
+            if self.app.state.request_submit_worktree_open {
+                self.app.state.request_submit_worktree_open = false;
+                self.app.submit_worktree_open_via_api();
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+            }
+
+            if self.app.state.request_submit_worktree_remove {
+                self.app.state.request_submit_worktree_remove = false;
+                self.app.submit_worktree_remove_via_api();
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.deferred_worktree_submit");
+            }
+
+            if self.app.state.request_reload_config {
+                self.app.state.request_reload_config = false;
+                self.reload_server_config(true);
+                needs_render = true;
+                needs_full_render = true;
+                crate::render_prof::event("full_render_cause.config_reload");
             }
 
             if latest_app_client(&self.clients).is_some() && self.app.ensure_default_workspace() {
