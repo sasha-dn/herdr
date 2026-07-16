@@ -1833,6 +1833,15 @@ pub(crate) enum ClosedEntry {
 /// are dropped past this bound.
 pub(crate) const MAX_CLOSED_ENTRIES: usize = 25;
 
+/// Which of the three stacked sidebar bands (Spaces / Panes / Agents) are
+/// collapsed to a single header row. Client-only TUI presentation state.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SidebarSectionCollapse {
+    pub spaces: bool,
+    pub panes: bool,
+    pub agents: bool,
+}
+
 /// All application state — pure data, no channels or async runtime.
 /// Testable without PTYs or a tokio runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1975,6 +1984,16 @@ pub struct AppState {
     /// Ratio of the remaining sidebar height (below the Spaces band) allocated to
     /// the Panes section; the Agents section takes the rest.
     pub sidebar_pane_section_split: f32,
+    /// Whether the Spaces band is collapsed to a single header row. Client-only
+    /// TUI presentation state (mirrors [`AppState::sidebar_collapsed`], which
+    /// collapses the whole sidebar); ephemeral, not persisted.
+    pub(crate) spaces_section_collapsed: bool,
+    /// Whether the Panes band is collapsed to a single header row. Client-only
+    /// TUI presentation state; ephemeral, not persisted.
+    pub(crate) pane_section_collapsed: bool,
+    /// Whether the Agents band is collapsed to a single header row. Client-only
+    /// TUI presentation state; ephemeral, not persisted.
+    pub(crate) agents_section_collapsed: bool,
     pub agent_panel_sort: AgentPanelSort,
     pub status_indicators: crate::config::StatusIndicatorStyle,
     /// Transient session-wide projection override for the built-in Agents view.
@@ -2084,6 +2103,15 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// Which stacked sidebar bands are currently collapsed to a header row.
+    pub(crate) fn sidebar_section_collapse(&self) -> SidebarSectionCollapse {
+        SidebarSectionCollapse {
+            spaces: self.spaces_section_collapsed,
+            panes: self.pane_section_collapsed,
+            agents: self.agents_section_collapsed,
+        }
     }
 
     /// Resolve a stable [`crate::pane::PaneParentRef`] to the live
@@ -2429,6 +2457,9 @@ impl AppState {
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             sidebar_pane_section_split: 0.5,
+            spaces_section_collapsed: false,
+            pane_section_collapsed: false,
+            agents_section_collapsed: false,
             agent_panel_sort: AgentPanelSort::Spaces,
             status_indicators: crate::config::StatusIndicatorStyle::Dots,
             agent_view_override: None,
