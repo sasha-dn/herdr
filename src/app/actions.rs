@@ -247,6 +247,44 @@ pub struct PaneStateUpdate {
 // Navigator operations
 // ---------------------------------------------------------------------------
 
+/// Resolve the index to focus when cycling a sidebar section.
+///
+/// `ids` is the section's entries in display order, `focused` the currently
+/// focused pane, `remembered` the last pane selected within this section, and
+/// `forward` the cycle direction. When the current focus is within the section,
+/// cycle normally from it. When focus is outside the section, jump to the
+/// remembered entry if it is still present; otherwise fall back to the direction
+/// default (first entry forward, last entry backward). Returns `None` only when
+/// the section is empty. Shared by the AppState and live App cycle paths so the
+/// cross-section jump stays identical.
+pub(crate) fn section_cycle_target_index(
+    ids: &[PaneId],
+    focused: Option<PaneId>,
+    remembered: Option<PaneId>,
+    forward: bool,
+) -> Option<usize> {
+    if ids.is_empty() {
+        return None;
+    }
+    if let Some(current_idx) = focused.and_then(|pane_id| ids.iter().position(|id| *id == pane_id))
+    {
+        let target = if forward {
+            (current_idx + 1) % ids.len()
+        } else if current_idx == 0 {
+            ids.len() - 1
+        } else {
+            current_idx - 1
+        };
+        return Some(target);
+    }
+    if let Some(remembered) = remembered {
+        if let Some(idx) = ids.iter().position(|id| *id == remembered) {
+            return Some(idx);
+        }
+    }
+    Some(if forward { 0 } else { ids.len() - 1 })
+}
+
 impl AppState {
     pub(crate) fn current_pane_focus_target(&self) -> Option<PaneFocusTarget> {
         let ws_idx = self.active?;
@@ -319,10 +357,29 @@ impl AppState {
         {
             tab.layout.focus_pane(pane_id);
             self.previous_pane_focus = previous;
+            self.record_section_focus_memory(pane_id);
             self.mark_session_dirty();
             return true;
         }
         false
+    }
+
+    /// Remember the last pane focused within each sidebar section so an
+    /// agent-nav or pane-nav key can jump back to it when focus is currently
+    /// outside that section. A pane in neither section list updates neither
+    /// field. Client-only TUI presentation state.
+    pub(crate) fn record_section_focus_memory(&mut self, pane_id: PaneId) {
+        if crate::ui::agent_panel_entries(self)
+            .iter()
+            .any(|entry| entry.pane_id == pane_id)
+        {
+            self.last_agent_focus = Some(pane_id);
+        } else if crate::ui::sidebar_pane_section_entries(self)
+            .iter()
+            .any(|entry| entry.pane_id == pane_id)
+        {
+            self.last_pane_section_focus = Some(pane_id);
+        }
     }
 
     #[cfg(test)]
@@ -1569,22 +1626,15 @@ impl AppState {
 
     fn cycle_agent_entry(&mut self, forward: bool) {
         let targets = self.visible_agent_targets();
-        if targets.is_empty() {
-            return;
-        }
-
+        let ids: Vec<PaneId> = targets.iter().map(|(_, pane_id)| *pane_id).collect();
         let focused = self
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| targets.iter().position(|(_, target)| *target == pane_id));
-        let target_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % targets.len(),
-            (Some(0), false) => targets.len() - 1,
-            (Some(idx), false) => idx - 1,
-            (None, true) => 0,
-            (None, false) => targets.len() - 1,
+        let Some(target_idx) =
+            section_cycle_target_index(&ids, focused, self.last_agent_focus, forward)
+        else {
+            return;
         };
 
         self.focus_agent_entry(target_idx);
@@ -1632,22 +1682,15 @@ impl AppState {
 
     fn cycle_pane_section_entry(&mut self, forward: bool) {
         let targets = self.pane_section_targets();
-        if targets.is_empty() {
-            return;
-        }
-
+        let ids: Vec<PaneId> = targets.iter().map(|(_, pane_id)| *pane_id).collect();
         let focused = self
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .and_then(crate::workspace::Workspace::focused_pane_id);
-        let current_idx =
-            focused.and_then(|pane_id| targets.iter().position(|(_, target)| *target == pane_id));
-        let target_idx = match (current_idx, forward) {
-            (Some(idx), true) => (idx + 1) % targets.len(),
-            (Some(0), false) => targets.len() - 1,
-            (Some(idx), false) => idx - 1,
-            (None, true) => 0,
-            (None, false) => targets.len() - 1,
+        let Some(target_idx) =
+            section_cycle_target_index(&ids, focused, self.last_pane_section_focus, forward)
+        else {
+            return;
         };
 
         self.focus_pane_section_entry(target_idx);
@@ -4092,6 +4135,224 @@ mod tests {
         assert_eq!(state.active, Some(0));
         assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
         state.assert_invariants_for_test();
+    }
+
+    // Build ws0 with two agents (root, p2) and one non-agent pane (p3), focused
+    // on root. Returns (state, p3) where p3 is the sole Panes-section entry.
+    fn state_two_agents_one_pane() -> (AppState, crate::layout::PaneId) {
+        let mut ws = Workspace::test_new("one");
+        let root = ws.tabs[0].root_pane;
+        let p2 = ws.test_split(Direction::Horizontal);
+        let p3 = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(root);
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![ws];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        mark_agent(&mut state, 0, 0, root);
+        mark_agent(&mut state, 0, 0, p2);
+        state.reconcile_pane_section_order();
+
+        assert_eq!(crate::ui::agent_panel_entries(&state).len(), 2);
+        let panes: Vec<crate::layout::PaneId> = crate::ui::sidebar_pane_section_entries(&state)
+            .iter()
+            .map(|entry| entry.pane_id)
+            .collect();
+        assert_eq!(panes, vec![p3]);
+        (state, p3)
+    }
+
+    #[test]
+    fn next_agent_on_pane_jumps_to_last_selected_agent() {
+        let (mut state, pane) = state_two_agents_one_pane();
+
+        // Select the second agent, then step off into the non-agent pane.
+        assert!(state.focus_agent_entry(1));
+        let remembered = state.workspaces[0].focused_pane_id().unwrap();
+        assert_eq!(state.last_agent_focus, Some(remembered));
+        state.focus_pane_in_workspace(0, pane);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(pane));
+
+        // next_agent jumps back to the remembered agent, not the default first.
+        state.next_agent();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(remembered));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn previous_agent_on_pane_jumps_to_same_last_selected_agent() {
+        let (mut state, pane) = state_two_agents_one_pane();
+
+        assert!(state.focus_agent_entry(1));
+        let remembered = state.workspaces[0].focused_pane_id().unwrap();
+        state.focus_pane_in_workspace(0, pane);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(pane));
+
+        // Direction does not matter for the cross-section jump.
+        state.previous_agent();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(remembered));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn pane_nav_on_agent_jumps_to_last_selected_pane_either_direction() {
+        // ws0: root is an agent, p2/p3 are non-agent Panes-section entries.
+        let mut ws = Workspace::test_new("one");
+        let root = ws.tabs[0].root_pane;
+        let p2 = ws.test_split(Direction::Horizontal);
+        let p3 = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(root);
+
+        let mut state = AppState::test_new();
+        state.workspaces = vec![ws];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = Mode::Terminal;
+        mark_agent(&mut state, 0, 0, root);
+        state.reconcile_pane_section_order();
+
+        let panes: Vec<crate::layout::PaneId> = crate::ui::sidebar_pane_section_entries(&state)
+            .iter()
+            .map(|entry| entry.pane_id)
+            .collect();
+        assert_eq!(panes.len(), 2);
+        assert!(panes.contains(&p2) && panes.contains(&p3));
+
+        // Select the second Panes-section entry, then focus the agent.
+        assert!(state.focus_pane_section_entry(1));
+        let remembered = state.workspaces[0].focused_pane_id().unwrap();
+        assert_eq!(state.last_pane_section_focus, Some(remembered));
+        state.focus_pane_in_workspace(0, root);
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(root));
+
+        // next_pane jumps to the remembered pane.
+        state.next_pane();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(remembered));
+
+        // previous_pane from the agent jumps to the same remembered pane.
+        state.focus_pane_in_workspace(0, root);
+        state.previous_pane();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(remembered));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_nav_without_memory_falls_back_to_direction_default() {
+        let (mut state, pane) = state_two_agents_one_pane();
+        let agents: Vec<crate::layout::PaneId> = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .map(|entry| entry.pane_id)
+            .collect();
+
+        // Sit on the non-agent pane; no agent has been selected this session.
+        state.focus_pane_in_workspace(0, pane);
+        assert_eq!(state.last_agent_focus, None);
+
+        // Forward defaults to the first agent.
+        state.next_agent();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(agents[0]));
+
+        // Backward defaults to the last agent. Clear the memory the forward jump
+        // just recorded so this again exercises the no-memory path.
+        state.focus_pane_in_workspace(0, pane);
+        state.last_agent_focus = None;
+        state.previous_agent();
+        assert_eq!(
+            state.workspaces[0].focused_pane_id(),
+            Some(agents[agents.len() - 1])
+        );
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_nav_with_stale_memory_falls_back_to_default() {
+        let (mut state, pane) = state_two_agents_one_pane();
+        let agents: Vec<crate::layout::PaneId> = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .map(|entry| entry.pane_id)
+            .collect();
+
+        // Remembered entry points at a pane that is not in the agents list
+        // (as if the agent had since closed).
+        state.last_agent_focus = Some(pane);
+        state.focus_pane_in_workspace(0, pane);
+
+        state.next_agent();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(agents[0]));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_nav_within_section_cycles_and_updates_memory() {
+        let (mut state, _pane) = state_two_agents_one_pane();
+        // Focus starts on the first agent (root), so cycling stays in-section.
+        let agents: Vec<crate::layout::PaneId> = crate::ui::agent_panel_entries(&state)
+            .iter()
+            .map(|entry| entry.pane_id)
+            .collect();
+        let start = state.workspaces[0].focused_pane_id().unwrap();
+        assert!(agents.contains(&start));
+
+        state.next_agent();
+        let landed = state.workspaces[0].focused_pane_id().unwrap();
+        assert_ne!(landed, start, "within-section next moves to another agent");
+        assert!(agents.contains(&landed));
+        // Normal cycling records the new selection as the section memory.
+        assert_eq!(state.last_agent_focus, Some(landed));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn section_cycle_target_index_handles_all_cases() {
+        let a = crate::layout::PaneId::from_raw(1);
+        let b = crate::layout::PaneId::from_raw(2);
+        let c = crate::layout::PaneId::from_raw(3);
+        let ids = [a, b, c];
+
+        // Empty list yields no target.
+        assert_eq!(
+            section_cycle_target_index(&[], Some(a), Some(b), true),
+            None
+        );
+
+        // Within section: normal forward/backward cycling with wrap.
+        assert_eq!(
+            section_cycle_target_index(&ids, Some(a), None, true),
+            Some(1)
+        );
+        assert_eq!(
+            section_cycle_target_index(&ids, Some(a), None, false),
+            Some(2)
+        );
+        assert_eq!(
+            section_cycle_target_index(&ids, Some(c), None, true),
+            Some(0)
+        );
+
+        // Outside section with valid memory: jump regardless of direction.
+        assert_eq!(
+            section_cycle_target_index(&ids, None, Some(b), true),
+            Some(1)
+        );
+        assert_eq!(
+            section_cycle_target_index(&ids, None, Some(b), false),
+            Some(1)
+        );
+
+        // Outside section, no memory: direction default (first / last).
+        assert_eq!(section_cycle_target_index(&ids, None, None, true), Some(0));
+        assert_eq!(section_cycle_target_index(&ids, None, None, false), Some(2));
+
+        // Outside section, stale memory: direction default.
+        let stale = crate::layout::PaneId::from_raw(99);
+        assert_eq!(
+            section_cycle_target_index(&ids, None, Some(stale), true),
+            Some(0)
+        );
     }
 
     #[test]

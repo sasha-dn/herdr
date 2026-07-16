@@ -625,6 +625,8 @@ impl App {
             workspaces,
             active,
             previous_pane_focus: None,
+            last_agent_focus: None,
+            last_pane_section_focus: None,
             selected,
             mode,
             should_quit: false,

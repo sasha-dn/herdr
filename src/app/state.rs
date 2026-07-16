@@ -1697,6 +1697,16 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
+    /// Last pane focused within the sidebar agents section this session. Lets an
+    /// agent-nav key jump back to the last selected agent when focus is currently
+    /// outside the agents section. Client-only TUI presentation state; ephemeral,
+    /// not persisted and not part of the wire protocol.
+    pub(crate) last_agent_focus: Option<PaneId>,
+    /// Last pane focused within the sidebar Panes section this session. Mirrors
+    /// [`AppState::last_agent_focus`] for the Panes section. Client-only TUI
+    /// presentation state; ephemeral, not persisted and not part of the wire
+    /// protocol.
+    pub(crate) last_pane_section_focus: Option<PaneId>,
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
@@ -2114,6 +2124,8 @@ impl AppState {
             workspaces: Vec::new(),
             active: None,
             previous_pane_focus: None,
+            last_agent_focus: None,
+            last_pane_section_focus: None,
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,
