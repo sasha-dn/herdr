@@ -951,6 +951,23 @@
     },
     "request": {
       "$defs": {
+        "AgentChildrenParams": {
+          "properties": {
+            "recursive": {
+              "default": false,
+              "description": "When true, return the whole descendant subtree in preorder (children,\ntheir children, and so on); otherwise return only the direct children.",
+              "type": "boolean"
+            },
+            "target": {
+              "description": "Target of the agent whose children to list (terminal id, public pane id\nlike `\"w1:p2\"`, or agent name).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentReadParams": {
           "properties": {
             "format": {
@@ -4027,6 +4044,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.children",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentChildrenParams"
             }
           },
           "required": [

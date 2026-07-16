@@ -40,6 +40,17 @@ pub struct AgentSetParentParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentChildrenParams {
+    /// Target of the agent whose children to list (terminal id, public pane id
+    /// like `"w1:p2"`, or agent name).
+    pub target: String,
+    /// When true, return the whole descendant subtree in preorder (children,
+    /// their children, and so on); otherwise return only the direct children.
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentStartParams {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
