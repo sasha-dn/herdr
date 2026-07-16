@@ -4949,6 +4949,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.children",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentChildrenParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.read",
               "type": "string"
             },

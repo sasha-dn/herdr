@@ -291,6 +291,7 @@ For the pane-versus-agent model and complete orchestration examples, see [Agent 
 ```bash
 herdr agent list
 herdr agent get <target>
+herdr agent children <target> [--recursive] [--json]
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
 herdr agent send-keys <target> <key> [key ...]
 herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
@@ -311,6 +312,8 @@ Agent targets are either a unique live agent name or the pane ID that currently 
 `agent start --parent <target>` records the started agent's parent (resolved with the same target rules as other agent commands) without changing where `--pane` places it. The child then nests under its parent in the agents panel across every sort mode. It errors with `agent_parent_not_found` if the target does not resolve to an agent pane.
 
 `agent set-parent <target> <parent>` assigns or changes the parent of an already-running agent. Both targets resolve with the same rules and must be agent panes. It only assigns or changes the link; it never clears it. The command rejects a target that is its own parent and any assignment that would create a cycle (a parent that is the child itself or one of its descendants). The change takes effect immediately, so the child re-nests under its new parent on the next agents-panel render, and the link persists across restart.
+
+`agent children <target>` lists the child agents nested under an agent in the agents-panel tree. The target resolves with the same rules and must be an agent pane. By default it prints one public pane id per direct child, one per line, so it drops straight into shell loops; add `--recursive` to include the whole descendant subtree in tree (preorder) order, and `--json` to emit the full agent records instead of bare pane ids.
 
 A successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
 
