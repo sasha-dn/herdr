@@ -280,7 +280,14 @@ impl std::fmt::Display for ClientError {
                 Ok(())
             }
             ClientError::ConnectionLost(err) => {
-                write!(f, "lost connection to server: {err}")
+                if let Ok(reattach_command) = std::env::var(crate::remote::REATTACH_COMMAND_ENV_VAR)
+                {
+                    write!(f, "lost connection to remote Herdr: {err}")?;
+                    write!(f, "\nIf the remote server survived the SSH or network drop, its panes may still be running.")?;
+                    write!(f, "\nRun `{reattach_command}` to reattach")
+                } else {
+                    write!(f, "lost connection to server: {err}")
+                }
             }
             ClientError::Protocol(err) => {
                 write!(f, "protocol error: {err}")
@@ -302,7 +309,14 @@ impl std::error::Error for ClientError {
 
 impl From<protocol::FramingError> for ClientError {
     fn from(err: protocol::FramingError) -> Self {
-        ClientError::Protocol(err)
+        match err {
+            protocol::FramingError::UnexpectedEof => ClientError::ConnectionLost(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "server closed connection",
+            )),
+            protocol::FramingError::Io(err) => ClientError::ConnectionLost(err),
+            err => ClientError::Protocol(err),
+        }
     }
 }
 
@@ -331,6 +345,7 @@ fn setup_terminal_with_capabilities(
     mouse_capture: bool,
 ) -> io::Result<TerminalGuard> {
     ratatui::init();
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     let host_color_scheme_reports =
         should_enable_host_color_scheme_reports(enable_client_protocols);
 
@@ -518,6 +533,7 @@ fn restore_windows_input_mode_value(mode: u32) {
 }
 
 fn set_mouse_capture(enabled: bool) -> io::Result<()> {
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     if enabled {
         execute!(io::stdout(), EnableMouseCapture)
     } else {
@@ -551,6 +567,7 @@ fn restore_terminal_state(
         DisableBracketedPaste,
         DisableMouseCapture
     );
+    let _ = crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout());
     #[cfg(windows)]
     if let Some(mode) = restore_windows_input_mode {
         restore_windows_input_mode_value(mode);
@@ -1082,6 +1099,7 @@ fn run_client_with_mode(
     init_logging();
 
     let loaded_config = crate::config::Config::load();
+    crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
@@ -1246,6 +1264,8 @@ async fn run_client_loop(
 ) -> Result<(), ClientError> {
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
+    #[cfg(unix)]
+    let is_remote_client = is_remote_client_process();
 
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
@@ -1261,6 +1281,7 @@ async fn run_client_loop(
         redraw_on_focus_gained: config.redraw_on_focus_gained,
     };
     debug!(?negotiated_encoding, "client render encoding active");
+    let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
 
     // Channel for events from the stdin, resize, and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
@@ -1270,8 +1291,14 @@ async fn run_client_loop(
         state.attach_escape.is_none() && should_query_host_terminal_theme();
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
+    let stdin_mouse_capture_active = host_mouse_capture_active.clone();
     std::thread::spawn(move || {
-        input::stdin_reader_loop(stdin_tx, &stdin_quit, will_query_host_terminal_theme);
+        input::stdin_reader_loop(
+            stdin_tx,
+            &stdin_quit,
+            will_query_host_terminal_theme,
+            stdin_mouse_capture_active,
+        );
     });
 
     if will_query_host_terminal_theme {
@@ -1369,7 +1396,11 @@ async fn run_client_loop(
                     }
                     data
                 };
-                if should_bridge_clipboard_image_paste(&data, state.remote_image_paste_key) {
+                if should_bridge_clipboard_image_paste(
+                    &data,
+                    is_remote_client,
+                    state.remote_image_paste_key,
+                ) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
                         if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
                             warn!(
@@ -1499,6 +1530,7 @@ async fn run_client_loop(
                             let _ = enable_windows_virtual_terminal_input();
                         }
                         state.mouse_capture_active = desired;
+                        host_mouse_capture_active.store(desired, Ordering::Release);
                     }
                 }
                 ServerMessage::Welcome { .. } => {
@@ -1706,10 +1738,11 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
 #[cfg(unix)]
 fn should_bridge_clipboard_image_paste(
     data: &[u8],
+    is_remote_client: bool,
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 ) -> bool {
     if data == b"\x1b[200~\x1b[201~" {
-        return true;
+        return is_remote_client;
     }
 
     let Some(remote_image_paste_key) = remote_image_paste_key else {
@@ -2004,21 +2037,37 @@ mod tests {
     #[test]
     fn clipboard_image_paste_bridge_triggers_on_configured_key_and_empty_paste() {
         let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
-        assert!(should_bridge_clipboard_image_paste(&[0x16], Some(ctrl_v)));
+        assert!(should_bridge_clipboard_image_paste(
+            &[0x16],
+            true,
+            Some(ctrl_v)
+        ));
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[118;5u",
+            true,
             Some(ctrl_v)
         ));
         assert!(should_bridge_clipboard_image_paste(
             b"\x1b[200~\x1b[201~",
+            true,
             None
         ));
         assert!(!should_bridge_clipboard_image_paste(
-            b"\x1b[200~text\x1b[201~",
+            b"\x1b[200~\x1b[201~",
+            false,
             Some(ctrl_v)
         ));
-        assert!(!should_bridge_clipboard_image_paste(&[0x16], None));
-        assert!(!should_bridge_clipboard_image_paste(b"v", Some(ctrl_v)));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"\x1b[200~text\x1b[201~",
+            true,
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste(&[0x16], true, None));
+        assert!(!should_bridge_clipboard_image_paste(
+            b"v",
+            true,
+            Some(ctrl_v)
+        ));
     }
 
     #[test]
@@ -2372,12 +2421,38 @@ mod tests {
 
     #[test]
     fn client_error_display_connection_lost() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = EnvVarsRemovedGuard::new(&[crate::remote::REATTACH_COMMAND_ENV_VAR]);
         let err =
             ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
         let msg = err.to_string();
         assert!(
             msg.contains("lost connection to server"),
             "should mention lost connection: {msg}"
+        );
+    }
+
+    #[test]
+    fn client_error_display_remote_connection_lost_has_reattach_hint() {
+        let _guard = env_lock().lock().unwrap();
+        let _remote_env = EnvVarGuard::set(
+            crate::remote::REATTACH_COMMAND_ENV_VAR,
+            "herdr --remote host --session work",
+        );
+        let err =
+            ClientError::ConnectionLost(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("lost connection to remote Herdr"),
+            "should mention remote connection loss: {msg}"
+        );
+        assert!(
+            msg.contains("panes may still be running"),
+            "should explain possible persistence: {msg}"
+        );
+        assert!(
+            msg.contains("Run `herdr --remote host --session work` to reattach"),
+            "should show remote reattach command: {msg}"
         );
     }
 

@@ -161,6 +161,8 @@ pub struct App {
     pub(crate) selection_autoscroll_deadline: Option<Instant>,
     pub(crate) selection_highlight_clear_deadline: Option<Instant>,
     pub(crate) session_save_deadline: Option<Instant>,
+    pub(crate) session_save_thread: Option<std::thread::JoinHandle<()>>,
+    pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) persist_pane_history: bool,
     pub(crate) last_render_at: Option<Instant>,
     pub(crate) suppressed_repeat_keys:
@@ -865,6 +867,8 @@ impl App {
             agent_metadata_deadline: None,
             pending_agent_resume_deadline: None,
             session_save_deadline: None,
+            session_save_thread: None,
+            detached_custom_command_children: Vec::new(),
             selection_autoscroll_deadline: None,
             selection_highlight_clear_deadline: None,
             persist_pane_history: config.experimental.pane_history,
@@ -1024,6 +1028,7 @@ impl App {
         let mut host_mouse_capture_active = self.state.mouse_capture;
 
         while !self.state.should_quit {
+            self.reap_finished_custom_commands();
             if self.render_dirty.load(Ordering::Acquire) {
                 needs_render = true;
             }
@@ -1267,6 +1272,7 @@ impl App {
         if desired == *active {
             return Ok(());
         }
+        crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
         if desired {
             execute!(io::stdout(), EnableMouseCapture)?;
         } else {
@@ -1929,6 +1935,14 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         )
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("herdr-{name}-{}-{stamp}", std::process::id()))
     }
 
     #[cfg(windows)]
@@ -2628,7 +2642,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_scope = \"current\"\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
+            "[terminal]\ndefault_shell = \"nu\"\nshell_mode = \"non_login\"\nnew_cwd = \"home\"\n[keys]\nnew_workspace = \"prefix+m\"\nprefix = \"ctrl+a\"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\nagent_panel_sort = \"priority\"\nredraw_on_focus_gained = false\nright_click_passthrough_modifier = \"ctrl\"\n[ui.toast]\ndelivery = \"herdr\"\n[experimental]\nswitch_ascii_input_source_in_prefix = true\n",
         )
         .unwrap();
         std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
@@ -2911,6 +2925,39 @@ mod tests {
             .is_some_and(|message| {
                 message.contains("keys.new_workspace") && message.contains("disabling binding")
             }));
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_applies_known_sibling_and_summarizes_unknown_key() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("reload-config-unknown-key");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let target_mouse_capture = !app.state.mouse_capture;
+        std::fs::write(
+            &path,
+            format!("[ui]\nmouse_capture = {target_mouse_capture}\nmouse_captur = false\n"),
+        )
+        .unwrap();
+
+        let report = app.reload_config();
+
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Partial);
+        assert_eq!(
+            report.diagnostics,
+            vec!["unknown config key ui.mouse_captur; ignoring key"]
+        );
+        assert_eq!(app.state.mouse_capture, target_mouse_capture);
+        assert!(app
+            .state
+            .config_diagnostic
+            .as_deref()
+            .is_some_and(|message| message.contains("unknown config key ui.mouse_captur")));
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -4440,6 +4487,71 @@ mod tests {
         app.handle_scheduled_tasks(Instant::now(), false);
 
         assert!(app.session_save_deadline.is_none());
+    }
+
+    #[test]
+    fn due_session_save_starts_background_writer() {
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
+        let config_home = unique_temp_path("background-session-save");
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        std::env::remove_var(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("autosave")];
+        app.state.ensure_test_terminals();
+        app.session_save_deadline = Some(Instant::now() - Duration::from_secs(1));
+
+        app.handle_scheduled_tasks(Instant::now(), false);
+
+        assert!(app.session_save_thread.is_some());
+        assert!(app.session_save_deadline.is_none());
+        app.save_session_now();
+        assert!(crate::session::data_dir().join("session.json").exists());
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
+    fn background_session_save_reschedules_when_writer_is_busy() {
+        let mut app = test_app();
+        app.no_session = false;
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        app.session_save_thread = Some(std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        }));
+
+        app.start_background_session_save();
+
+        assert!(app.session_save_thread.is_some());
+        assert!(app.session_save_deadline.is_some());
+
+        release_tx.send(()).unwrap();
+        app.no_session = true;
+        app.save_session_now();
+    }
+
+    #[test]
+    fn final_session_save_joins_background_writer_before_returning() {
+        let mut app = test_app();
+        app.no_session = true;
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        app.session_save_thread = Some(std::thread::spawn(move || {
+            let _ = release_rx.recv();
+            done_tx.send(()).unwrap();
+        }));
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            release_tx.send(()).unwrap();
+        });
+
+        app.save_session_now();
+
+        releaser.join().unwrap();
+        done_rx.try_recv().unwrap();
+        assert!(app.session_save_thread.is_none());
     }
 
     #[test]

@@ -4,8 +4,10 @@ use serde::Serialize;
 
 use crate::api::client::{ApiClient, ApiClientError};
 use crate::api::schema::{
-    AgentStatus, ClientWindowTitleSetParams, EmptyParams, Method, OutputMatch, PaneAgentState,
-    PaneWaitForOutputParams, ReadFormat, ReadSource, Request, SplitDirection, Subscription,
+    AgentStatus, ClientWindowTitleSetParams, EmptyParams, EventData, EventMatch, EventsWaitParams,
+    Method, OutputMatch, PaneAgentState, PaneWaitForOutputParams, ReadFormat, ReadSource, Request,
+    ResponseResult, SplitDirection, SubscriptionEventData, SubscriptionEventEnvelope,
+    SubscriptionEventKind,
 };
 
 mod agent;
@@ -14,6 +16,7 @@ mod integration;
 mod notification;
 mod pane;
 mod plugin;
+mod protocol_guard;
 mod server;
 mod status;
 mod tab;
@@ -817,19 +820,77 @@ fn wait_agent_status(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    wait_for_agent_change(
-        Request {
-            id: "cli:wait:agent-status".into(),
-            method: Method::EventsSubscribe(crate::api::schema::EventsSubscribeParams {
-                subscriptions: vec![Subscription::PaneAgentStatusChanged {
-                    pane_id,
-                    agent_status: Some(agent_status),
-                }],
-            }),
-        },
-        timeout_ms,
-        "timed out waiting for agent status change",
-    )
+    wait_for_agent_status_change(pane_id, agent_status, timeout_ms)
+}
+
+fn wait_for_agent_status_change(
+    pane_id: String,
+    agent_status: AgentStatus,
+    timeout_ms: Option<u64>,
+) -> std::io::Result<i32> {
+    let request = Request {
+        id: "cli:wait:agent-status".into(),
+        method: Method::EventsWait(EventsWaitParams {
+            match_event: EventMatch::PaneAgentStatusChanged {
+                pane_id,
+                agent_status,
+            },
+            timeout_ms,
+        }),
+    };
+    let response = send_request(&request)?;
+    match crate::api::client::parse_response_value(response) {
+        Ok(success) => {
+            let ResponseResult::WaitMatched { event } = success.result else {
+                return Err(std::io::Error::other("unexpected wait response result"));
+            };
+            let EventData::PaneAgentStatusChanged {
+                pane_id,
+                workspace_id,
+                agent_status,
+                agent,
+                title,
+                display_agent,
+                custom_status,
+                state_labels,
+            } = event.data
+            else {
+                return Err(std::io::Error::other("unexpected wait event data"));
+            };
+            let event = SubscriptionEventEnvelope {
+                event: SubscriptionEventKind::PaneAgentStatusChanged,
+                data: SubscriptionEventData::PaneAgentStatusChanged(
+                    crate::api::schema::PaneAgentStatusChangedEvent {
+                        pane_id,
+                        workspace_id,
+                        agent_status,
+                        agent,
+                        custom_status,
+                        title,
+                        display_agent,
+                        state_labels,
+                    },
+                ),
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&event).map_err(std::io::Error::other)?
+            );
+            Ok(0)
+        }
+        Err(ApiClientError::ErrorResponse(response)) => {
+            if response.error.code == "timeout" {
+                eprintln!("timed out waiting for agent status change");
+            } else {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&response).map_err(std::io::Error::other)?
+                );
+            }
+            Ok(1)
+        }
+        Err(err) => Err(api_client_error_to_io(err)),
+    }
 }
 
 pub(super) fn wait_for_agent_change(
@@ -838,7 +899,9 @@ pub(super) fn wait_for_agent_change(
     timeout_message: &str,
 ) -> std::io::Result<i32> {
     let read_timeout = timeout_ms.map(Duration::from_millis);
-    let (ack, mut stream) = ApiClient::local()
+    let client = ApiClient::local();
+    ensure_server_protocol_compatible(&client, &request.id)?;
+    let (ack, mut stream) = client
         .subscribe_value(&request, read_timeout)
         .map_err(api_client_error_to_io)?;
     if let Err(err) = crate::api::client::parse_response_value(ack) {
@@ -891,9 +954,41 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 }
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
+    let client = ApiClient::local();
+    ensure_server_protocol_compatible(&client, &request.id)?;
+    client
+        .request_value(request)
+        .map_err(api_client_error_to_io)
+}
+
+pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde_json::Value> {
     ApiClient::local()
         .request_value(request)
         .map_err(api_client_error_to_io)
+}
+
+fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
+    let status = client.status().map_err(api_client_error_to_io)?;
+    let server_protocol = status
+        .protocol
+        .ok_or_else(|| std::io::Error::other("server ping did not include a protocol version"))?;
+    let Some(response) = protocol_guard::mismatch_response(
+        request_id,
+        server_protocol,
+        &crate::session::active_restart_after_update_guidance(),
+    ) else {
+        return Ok(());
+    };
+
+    eprintln!(
+        "{}",
+        serde_json::to_string(&response).map_err(std::io::Error::other)?
+    );
+    Err(protocol_guard::reported_error())
+}
+
+pub(crate) fn protocol_mismatch_was_reported(err: &std::io::Error) -> bool {
+    protocol_guard::was_reported(err)
 }
 
 fn api_timeout_error(err: &std::io::Error) -> bool {

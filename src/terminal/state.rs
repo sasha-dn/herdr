@@ -439,9 +439,17 @@ impl TerminalState {
                 &agent_label,
                 &session_ref,
             );
-        if self.known_agent_label_conflicts_with_detected_agent(&agent_label)
-            || self.current_session_owner_conflicts(&source, &agent_label)
-        {
+        if self.known_agent_label_conflicts_with_detected_agent(&agent_label) {
+            return None;
+        }
+        let owner_conflicts = self.current_session_owner_conflicts(&source, &agent_label);
+        let foreground_takeover_allowed = owner_conflicts
+            && self.foreground_agent_confirms_hook_authority_takeover(
+                &source,
+                &agent_label,
+                &session_ref,
+            );
+        if owner_conflicts && !foreground_takeover_allowed {
             return None;
         }
         let session_ref = session_ref.map(|session_ref| {
@@ -467,6 +475,11 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
+        if foreground_takeover_allowed {
+            self.suppress_current_full_lifecycle_hook_authority(
+                FullLifecycleHookSuppressionReason::HookClear,
+            );
+        }
         if session_ref.is_some() {
             if let Some(suppressed) = self.suppressed_full_lifecycle_hook_reports.remove(&source) {
                 if let Some(suppressed_ref) = suppressed.session_ref {
@@ -805,6 +818,26 @@ impl TerminalState {
         }
     }
 
+    fn forget_stale_full_lifecycle_hook_session(
+        &mut self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) {
+        let remove_source = self
+            .stale_full_lifecycle_hook_sessions
+            .get_mut(source)
+            .is_some_and(|stale_sessions| {
+                stale_sessions.retain(|stale| {
+                    stale.agent_label != agent_label || &stale.session_ref != session_ref
+                });
+                stale_sessions.is_empty()
+            });
+        if remove_source {
+            self.stale_full_lifecycle_hook_sessions.remove(source);
+        }
+    }
+
     fn detected_state_observed_before_release_suppression(
         &self,
         detected_agent: Option<Agent>,
@@ -900,11 +933,19 @@ impl TerminalState {
                 "codex",
                 Some("startup" | "clear" | "resume" | "compact")
             ) | ("herdr:opencode", "opencode", Some("new"))
+                | ("herdr:pi", "pi", Some("new" | "resume" | "fork"))
                 | (
                     "herdr:omp",
                     "omp",
                     Some("startup" | "new" | "resume" | "fork")
                 )
+        )
+    }
+
+    fn session_start_source_is_recognized(session_start_source: Option<&str>) -> bool {
+        matches!(
+            session_start_source,
+            Some("startup" | "clear" | "resume" | "compact" | "new" | "fork")
         )
     }
 
@@ -945,15 +986,25 @@ impl TerminalState {
             &agent_label,
             session_start_source.as_deref(),
         );
-        if self.current_session_owner_conflicts(&source, &agent_label)
-            || self
-                .conflicting_same_owner_session_ref(
-                    &source,
-                    &agent_label,
-                    &session_ref,
-                    session_start_source.as_deref(),
-                )
-                .is_some()
+        let owner_conflicts = self.current_session_owner_conflicts(&source, &agent_label);
+        let foreground_takeover_allowed = owner_conflicts
+            && self.foreground_agent_confirms_different_owner_takeover(
+                &source,
+                &agent_label,
+                &session_ref,
+                session_start_source.as_deref(),
+            );
+        if owner_conflicts && !foreground_takeover_allowed {
+            return None;
+        }
+        if self
+            .conflicting_same_owner_session_ref(
+                &source,
+                &agent_label,
+                &session_ref,
+                session_start_source.as_deref(),
+            )
+            .is_some()
         {
             return None;
         }
@@ -972,11 +1023,19 @@ impl TerminalState {
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let previous_session = self.current_session_identity_for_persistence();
+        if session_replacement_allowed || foreground_takeover_allowed {
+            self.forget_stale_full_lifecycle_hook_session(&source, &agent_label, &session_ref);
+        }
         if let Some(replaced_hook_session) = replaced_hook_session {
             self.remember_stale_full_lifecycle_hook_session(
                 source.clone(),
                 agent_label.clone(),
                 replaced_hook_session,
+            );
+            self.hook_authority = None;
+        } else if foreground_takeover_allowed {
+            self.suppress_current_full_lifecycle_hook_authority(
+                FullLifecycleHookSuppressionReason::HookClear,
             );
             self.hook_authority = None;
         }
@@ -1004,6 +1063,41 @@ impl TerminalState {
         };
         crate::detect::parse_agent_label(agent_label)
             .is_some_and(|hook_agent| hook_agent != detected_agent)
+    }
+
+    fn foreground_agent_confirms_different_owner_takeover(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+        session_start_source: Option<&str>,
+    ) -> bool {
+        Self::session_start_source_is_recognized(session_start_source)
+            && self.foreground_agent_confirms_session_owner(source, agent_label, session_ref)
+    }
+
+    fn foreground_agent_confirms_hook_authority_takeover(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &Option<crate::agent_resume::AgentSessionRef>,
+    ) -> bool {
+        session_ref.as_ref().is_some_and(|session_ref| {
+            self.foreground_agent_confirms_session_owner(source, agent_label, session_ref)
+        })
+    }
+
+    fn foreground_agent_confirms_session_owner(
+        &self,
+        source: &str,
+        agent_label: &str,
+        session_ref: &crate::agent_resume::AgentSessionRef,
+    ) -> bool {
+        let Some(detected_agent) = self.detected_agent else {
+            return false;
+        };
+        crate::detect::parse_agent_label(agent_label) == Some(detected_agent)
+            && crate::agent_resume::plan(source, agent_label, session_ref).is_some()
     }
 
     fn accept_hook_report(&mut self, source: &str, seq: Option<u64>) -> bool {
@@ -1417,6 +1511,208 @@ mod tests {
             );
 
             assert_eq!(terminal.state, AgentState::Working);
+        }
+    }
+
+    #[test]
+    fn pi_session_replacement_reports_reanchor_full_lifecycle_authority() {
+        for reason in ["new", "resume", "fork"] {
+            let mut terminal = test_terminal();
+            let old_session = test_session_path(&format!("pi-{reason}-old.jsonl"));
+            let new_session = test_session_path(&format!("pi-{reason}-new.jsonl"));
+            terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+            terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(old_session),
+                Some(10),
+            );
+
+            let session_report = terminal.set_agent_session_ref_for_session_start(
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+                Some(11),
+                Some(reason.into()),
+            );
+
+            assert!(
+                session_report.is_some(),
+                "{reason} should replace the previous Pi session"
+            );
+            assert!(terminal.hook_authority.is_none());
+
+            let working = terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+                Some(12),
+            );
+
+            assert!(
+                working.is_some(),
+                "{reason} should accept working for the replacement session"
+            );
+            assert_eq!(terminal.state, AgentState::Working);
+            assert_eq!(
+                terminal.hook_authority.as_ref().unwrap().session_ref,
+                crate::agent_resume::AgentSessionRef::path(new_session)
+            );
+        }
+    }
+
+    #[test]
+    fn pi_resume_reactivates_a_previously_stale_session() {
+        let mut terminal = test_terminal();
+        let session_a = test_session_path("pi-session-a.jsonl");
+        let session_b = test_session_path("pi-session-b.jsonl");
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_a.clone()),
+            Some(10),
+        );
+
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::path(session_b.clone()),
+            Some(11),
+            Some("new".into()),
+        );
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_b.clone()),
+            Some(12),
+        );
+
+        let resumed = terminal.set_agent_session_ref_for_session_start(
+            "herdr:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::path(session_a.clone()),
+            Some(13),
+            Some("resume".into()),
+        );
+        let working = terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_a.clone()),
+            Some(14),
+        );
+
+        assert!(resumed.is_some());
+        assert!(working.is_some());
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().session_ref,
+            crate::agent_resume::AgentSessionRef::path(session_a)
+        );
+
+        let late_session_b = terminal.set_hook_authority_with_session_ref(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Idle,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::path(session_b),
+            Some(15),
+        );
+        assert!(late_session_b.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn pi_startup_adopts_persisted_session_without_live_authority() {
+        let mut terminal = test_terminal();
+        let old_session = test_session_path("pi-startup-old.jsonl");
+        let new_session = test_session_path("pi-startup-new.jsonl");
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(old_session)
+                .expect("test session path should be valid"),
+        });
+
+        let startup = terminal.set_agent_session_ref_for_session_start(
+            "herdr:pi".into(),
+            "pi".into(),
+            crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+            Some(11),
+            Some("startup".into()),
+        );
+
+        assert!(startup.is_some());
+        assert_eq!(
+            terminal.current_session_identity_for_persistence(),
+            Some((
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::agent_resume::AgentSessionRefKind::Path,
+                new_session,
+            ))
+        );
+    }
+
+    #[test]
+    fn pi_non_replacement_reports_preserve_full_lifecycle_authority() {
+        for reason in [None, Some("reload"), Some("startup")] {
+            let mut terminal = test_terminal();
+            let old_session = test_session_path("pi-current.jsonl");
+            let new_session = test_session_path("pi-unexpected.jsonl");
+            terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+            terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Idle,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(old_session.clone()),
+                Some(10),
+            );
+
+            let session_report = terminal.set_agent_session_ref_for_session_start(
+                "herdr:pi".into(),
+                "pi".into(),
+                crate::agent_resume::AgentSessionRef::path(new_session.clone()),
+                Some(11),
+                reason.map(str::to_string),
+            );
+            let working = terminal.set_hook_authority_with_session_ref(
+                "herdr:pi".into(),
+                "pi".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::path(new_session),
+                Some(12),
+            );
+
+            assert!(session_report.is_none());
+            assert!(working.is_none());
+            assert_eq!(terminal.state, AgentState::Idle);
+            assert_eq!(
+                terminal.hook_authority.as_ref().unwrap().session_ref,
+                crate::agent_resume::AgentSessionRef::path(old_session),
+                "{reason:?} must not replace the current Pi session"
+            );
         }
     }
 
@@ -2361,7 +2657,7 @@ mod tests {
         let now = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Omp), AgentState::Idle);
-        terminal.set_hook_authority_with_session_ref(
+        terminal.set_hook_authority_with_custom_status_at(
             "herdr:omp".into(),
             "omp".into(),
             AgentState::Working,
@@ -2369,6 +2665,7 @@ mod tests {
             None,
             crate::agent_resume::AgentSessionRef::id("omp-old"),
             Some(1000),
+            now,
         );
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Omp),
@@ -3528,6 +3825,212 @@ mod tests {
             )),
             Some(("herdr:droid", "droid", "droid-session"))
         );
+    }
+
+    #[test]
+    fn foreground_agent_session_replaces_stale_different_owner_session_ref() {
+        for session_start_source in ["resume", "startup"] {
+            let mut terminal = test_terminal();
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+            });
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+            let mutation = terminal
+                .set_agent_session_ref_for_session_start(
+                    "herdr:claude".into(),
+                    "claude".into(),
+                    crate::agent_resume::AgentSessionRef::id("claude-session"),
+                    Some(21),
+                    Some(session_start_source.into()),
+                )
+                .unwrap_or_else(|| {
+                    panic!("{session_start_source} should replace stale codex session")
+                });
+
+            assert!(mutation.session_ref_changed);
+            assert_eq!(
+                terminal.persisted_agent_session.as_ref().map(|session| (
+                    session.source.as_str(),
+                    session.agent.as_str(),
+                    session.session_ref.value.as_str()
+                )),
+                Some(("herdr:claude", "claude", "claude-session")),
+                "{session_start_source} should store claude session"
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_agent_session_requires_lifecycle_source_to_replace_different_owner() {
+        for session_start_source in [None, Some("other")] {
+            let mut terminal = test_terminal();
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+            });
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+            let mutation = terminal.set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("claude-session"),
+                Some(21),
+                session_start_source.map(str::to_string),
+            );
+
+            assert!(
+                mutation.is_none(),
+                "{session_start_source:?} should not replace"
+            );
+            assert_eq!(
+                terminal.persisted_agent_session.as_ref().map(|session| (
+                    session.source.as_str(),
+                    session.agent.as_str(),
+                    session.session_ref.value.as_str()
+                )),
+                Some(("herdr:codex", "codex", "codex-session"))
+            );
+        }
+    }
+
+    #[test]
+    fn different_owner_session_ref_requires_matching_detected_agent() {
+        for session_start_source in ["startup", "resume"] {
+            for detected_agent in [None, Some(Agent::Codex)] {
+                let mut terminal = test_terminal();
+                terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+                });
+                terminal.set_detected_state(detected_agent, AgentState::Idle);
+
+                let mutation = terminal.set_agent_session_ref_for_session_start(
+                    "herdr:claude".into(),
+                    "claude".into(),
+                    crate::agent_resume::AgentSessionRef::id("claude-session"),
+                    Some(21),
+                    Some(session_start_source.into()),
+                );
+
+                assert!(
+                    mutation.is_none(),
+                    "{session_start_source} with {detected_agent:?} should not replace"
+                );
+                assert_eq!(
+                    terminal.persisted_agent_session.as_ref().map(|session| (
+                        session.source.as_str(),
+                        session.agent.as_str(),
+                        session.session_ref.value.as_str()
+                    )),
+                    Some(("herdr:codex", "codex", "codex-session"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn custom_session_report_does_not_replace_different_owner_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "custom:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(21),
+            Some("resume".into()),
+        );
+
+        assert!(mutation.is_none());
+        assert_eq!(
+            terminal.persisted_agent_session.as_ref().map(|session| (
+                session.source.as_str(),
+                session.agent.as_str(),
+                session.session_ref.value.as_str()
+            )),
+            Some(("herdr:codex", "codex", "codex-session"))
+        );
+    }
+
+    #[test]
+    fn foreground_agent_session_replaces_stale_different_owner_hook_authority() {
+        let mut terminal = test_terminal();
+        let now = std::time::Instant::now();
+        terminal
+            .set_hook_authority_with_custom_status_at(
+                "herdr:opencode".into(),
+                "opencode".into(),
+                AgentState::Working,
+                None,
+                None,
+                crate::agent_resume::AgentSessionRef::id("opencode-session"),
+                Some(20),
+                now + Duration::from_millis(1),
+            )
+            .expect("initial hook authority should be accepted");
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Codex),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            now,
+        );
+
+        let mutation = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:codex".into(),
+                "codex".into(),
+                crate::agent_resume::AgentSessionRef::id("codex-session"),
+                Some(21),
+                Some("startup".into()),
+            )
+            .expect("foreground codex should replace stale hook authority");
+
+        assert!(mutation.session_ref_changed);
+        assert!(terminal.hook_authority.is_none());
+        assert_eq!(
+            terminal.current_session_identity_for_persistence(),
+            Some((
+                "herdr:codex".into(),
+                "codex".into(),
+                crate::agent_resume::AgentSessionRefKind::Id,
+                "codex-session".into()
+            ))
+        );
+        let late_old_session = terminal.set_hook_authority_with_session_ref(
+            "herdr:opencode".into(),
+            "opencode".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("opencode-session"),
+            Some(22),
+        );
+        assert!(late_old_session.is_none());
+
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        let fresh_session = terminal.set_hook_authority_with_session_ref(
+            "herdr:opencode".into(),
+            "opencode".into(),
+            AgentState::Working,
+            None,
+            None,
+            crate::agent_resume::AgentSessionRef::id("opencode-new-session"),
+            Some(23),
+        );
+        assert!(fresh_session.is_some());
     }
 
     #[test]

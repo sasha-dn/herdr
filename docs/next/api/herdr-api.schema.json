@@ -8386,6 +8386,10 @@
         },
         "ServerCapabilities": {
           "properties": {
+            "detached_server_daemon": {
+              "default": false,
+              "type": "boolean"
+            },
             "live_handoff": {
               "type": "boolean"
             }

@@ -71,6 +71,26 @@ use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
 
+const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
+
+fn wait_for_live_handoff_response_write(
+    response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+) {
+    let Some(response_write_complete) = response_write_complete else {
+        return;
+    };
+
+    match response_write_complete.recv_timeout(LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            warn!("timed out waiting for live handoff response write; old server exiting");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            warn!("live handoff response writer disconnected; old server exiting");
+        }
+    }
+}
+
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
         crate::sound::Sound::Done => "agent done",
@@ -193,7 +213,8 @@ pub struct HeadlessServer {
     app: app::App,
     #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
-    #[cfg(unix)]
+    // Kept on every platform so dropping HeadlessServer owns API server shutdown.
+    #[cfg_attr(windows, allow(dead_code))]
     api_server: Option<api::ServerHandle>,
     #[cfg(unix)]
     client_listener: LocalListener,
@@ -386,13 +407,11 @@ impl HeadlessServer {
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
         #[cfg(not(unix))]
-        let _ = (&api_tx, &api_server);
-
+        let _ = api_tx;
         Ok(Self {
             app,
             #[cfg(unix)]
             api_tx,
-            #[cfg(unix)]
             api_server,
             #[cfg(unix)]
             client_listener: listener,
@@ -446,6 +465,7 @@ impl HeadlessServer {
         loop {
             crate::render_prof::event("loop.tick");
             crate::render_prof::flush_if_due();
+            self.app.reap_finished_custom_commands();
 
             // If shutdown has been initiated, complete it and exit.
             if self.shutting_down {
@@ -1026,11 +1046,14 @@ impl HeadlessServer {
         }
         crate::server::handoff::wait_owned_ack(&mut stream);
 
+        Ok(())
+    }
+
+    fn finish_live_handoff_shutdown(&mut self) {
         self.shutting_down = true;
         self.app.state.should_quit = true;
         self.app.no_session = true;
         info!("live handoff completed; old server exiting");
-        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -2711,7 +2734,9 @@ impl HeadlessServer {
         }
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
-            let response = match self.perform_live_handoff(params.clone()) {
+            let handoff_result = self.perform_live_handoff(params.clone());
+            let handoff_succeeded = handoff_result.is_ok();
+            let response = match handoff_result {
                 Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
                     id: msg.request.id,
                     result: api::schema::ResponseResult::Ok {},
@@ -2726,6 +2751,10 @@ impl HeadlessServer {
             }
             .unwrap_or_else(|_| "{}".to_string());
             let _ = msg.respond_to.send(response);
+            if handoff_succeeded {
+                wait_for_live_handoff_response_write(msg.response_write_complete);
+                self.finish_live_handoff_shutdown();
+            }
             return true;
         }
 
@@ -3624,7 +3653,7 @@ impl HeadlessServer {
             .session_save_deadline
             .is_some_and(|deadline| now >= deadline)
         {
-            self.app.save_session_now();
+            self.app.start_background_session_save();
         }
 
         if let Some(deadline) = self
@@ -4104,7 +4133,6 @@ mod tests {
             app,
             #[cfg(unix)]
             api_tx: None,
-            #[cfg(unix)]
             api_server: None,
             #[cfg(unix)]
             client_listener: listener,
@@ -4187,6 +4215,7 @@ mod tests {
                     method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
                 },
                 respond_to,
+                response_write_complete: None,
             })
         );
         let response = response_rx
@@ -7752,6 +7781,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -7837,6 +7867,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -7888,6 +7919,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -7919,6 +7951,7 @@ next_tab = ""
                 ),
             },
             respond_to,
+            response_write_complete: None,
         });
 
         assert!(changed);
@@ -7955,6 +7988,7 @@ next_tab = ""
                     ),
                 },
                 respond_to,
+                response_write_complete: None,
             })
         );
 
@@ -8010,6 +8044,7 @@ next_tab = ""
                     ),
                 },
                 respond_to,
+                response_write_complete: None,
             })
         );
 
@@ -8282,6 +8317,7 @@ next_tab = ""
                 }),
             },
             respond_to,
+            response_write_complete: None,
         });
 
         assert!(changed);

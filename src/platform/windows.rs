@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::c_void,
     mem::{size_of, MaybeUninit},
     path::PathBuf,
@@ -21,9 +21,11 @@ use windows_sys::{
                     TH32CS_SNAPPROCESS,
                 },
             },
+            JobObjects::IsProcessInJob,
             Threading::{
-                GetExitCodeProcess, OpenProcess, TerminateProcess, PROCESS_BASIC_INFORMATION,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+                GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
+                DETACHED_PROCESS, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+                PROCESS_VM_READ,
             },
         },
         UI::Shell::{CommandLineToArgvW, ShellExecuteW},
@@ -45,6 +47,21 @@ struct WindowsProcessEntry {
 }
 
 pub fn raise_server_nofile_limit() {}
+
+pub fn detach_server_daemon_command(command: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(DETACHED_PROCESS);
+}
+
+pub fn current_process_is_detached_server_daemon() -> bool {
+    if !unsafe { GetConsoleWindow() }.is_null() {
+        return false;
+    }
+
+    let mut in_job = 0;
+    unsafe { IsProcessInJob(GetCurrentProcess(), null_mut(), &mut in_job) != 0 && in_job == 0 }
+}
 
 pub fn foreground_job(child_pid: u32) -> Option<ForegroundJob> {
     let entries = snapshot_processes();
@@ -140,11 +157,15 @@ fn process_is_ancestor(
     parent_by_pid: &HashMap<u32, u32>,
 ) -> bool {
     let mut current = descendant_pid;
-    while let Some(parent) = parent_by_pid.get(&current).copied() {
+    let mut visited = HashSet::new();
+    while visited.insert(current) {
+        let Some(parent) = parent_by_pid.get(&current).copied() else {
+            return false;
+        };
         if parent == ancestor_pid {
             return true;
         }
-        if parent == 0 || parent == current {
+        if parent == 0 {
             return false;
         }
         current = parent;
@@ -161,13 +182,23 @@ fn descendant_entries(root_pid: u32, entries: &[WindowsProcessEntry]) -> Vec<&Wi
 
     let mut output = Vec::new();
     let mut queue = VecDeque::new();
+    let mut visited = HashSet::new();
+    visited.insert(root_pid);
     if let Some(root_children) = children.get(&root_pid) {
-        queue.extend(root_children.iter().copied());
+        for entry in root_children.iter().copied() {
+            if visited.insert(entry.pid) {
+                queue.push_back(entry);
+            }
+        }
     }
     while let Some(entry) = queue.pop_front() {
         output.push(entry);
         if let Some(next) = children.get(&entry.pid) {
-            queue.extend(next.iter().copied());
+            for child in next.iter().copied() {
+                if visited.insert(child.pid) {
+                    queue.push_back(child);
+                }
+            }
         }
     }
     output
@@ -496,6 +527,47 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole, GetConsoleWindow};
+
+    const DETACHED_CONSOLE_TEST_CHILD_ENV: &str = "HERDR_TEST_DETACHED_CONSOLE_CHILD";
+
+    #[test]
+    fn server_daemon_command_does_not_inherit_console() {
+        if std::env::var_os(DETACHED_CONSOLE_TEST_CHILD_ENV).is_some() {
+            assert!(unsafe { GetConsoleWindow() }.is_null());
+            return;
+        }
+
+        let allocated_console = if unsafe { GetConsoleWindow() }.is_null() {
+            assert_ne!(unsafe { AllocConsole() }, 0, "allocate test console");
+            true
+        } else {
+            false
+        };
+
+        let test_exe = std::env::current_exe().expect("resolve test executable");
+        let mut child = Command::new(test_exe);
+        child
+            .arg("server_daemon_command_does_not_inherit_console")
+            .env(DETACHED_CONSOLE_TEST_CHILD_ENV, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        super::detach_server_daemon_command(&mut child);
+
+        let status = child.status().expect("spawn detached test child");
+        if allocated_console {
+            unsafe {
+                FreeConsole();
+            }
+        }
+
+        assert!(
+            status.success(),
+            "detached child inherited the test console"
+        );
+    }
+
     #[test]
     fn windows_process_cwd_reads_child_launch_directory() {
         let cwd = std::env::temp_dir().join(format!("herdr-cwd-test-{}", std::process::id()));
@@ -690,6 +762,40 @@ mod tests {
         pids.sort_unstable();
 
         assert_eq!(pids, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn windows_process_tree_ignores_pid_reuse_cycles() {
+        let entries = vec![
+            test_entry(10, 30, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+            test_entry(30, 20, "node.exe", &["node.exe"]),
+        ];
+
+        let descendants = super::descendant_entries(10, &entries);
+
+        assert_eq!(
+            descendants
+                .iter()
+                .map(|entry| entry.pid)
+                .collect::<Vec<_>>(),
+            vec![20, 30]
+        );
+    }
+
+    #[test]
+    fn windows_process_tree_returns_shell_when_candidate_parent_chain_cycles() {
+        let entries = vec![
+            test_entry(10, 40, "powershell.exe", &["powershell.exe"]),
+            test_entry(20, 10, "codex.exe", &["codex.exe"]),
+            test_entry(30, 10, "codex.exe", &["codex.exe"]),
+            test_entry(40, 10, "node.exe", &["node.exe"]),
+        ];
+
+        let job = super::select_pane_foreground_job(10, &entries).unwrap();
+
+        assert_eq!(job.process_group_id, 10);
+        assert_eq!(job.processes[0].name, "powershell.exe");
     }
 
     fn test_entry(
