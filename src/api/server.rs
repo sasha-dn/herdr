@@ -833,6 +833,7 @@ mod tests {
             custom_status: None,
             state_labels: HashMap::new(),
             agent_session: None,
+            parent: None,
             revision: 0,
         }
     }

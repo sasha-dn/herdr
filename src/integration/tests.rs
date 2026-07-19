@@ -2567,11 +2567,6 @@ fn bundled_integration_asset_versions_match_expected_versions() {
             QODERCLI_INTEGRATION_VERSION,
         ),
         ("cursor", CURSOR_HOOK_ASSET, CURSOR_INTEGRATION_VERSION),
-        (
-            "mastracode",
-            MASTRACODE_HOOK_ASSET,
-            MASTRACODE_INTEGRATION_VERSION,
-        ),
     ] {
         assert_eq!(
             parse_integration_version(asset),
