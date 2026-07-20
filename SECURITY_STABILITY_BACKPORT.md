@@ -499,3 +499,25 @@ picking `045f506e`.
   trailer.
 - Both `security-stability-backport` and `master` were pushed to `origin`
   (`sasha-dn/herdr`).
+
+## Follow-up: protocol version gap
+
+After the initial 27-commit backport, this fork's wire protocol (15) was found to be
+incompatible (`compatible: no` per `herdr status`) with a locally-running, more-current
+installation on protocol 16. Investigation found the exact upstream commit that bumped
+15→16:
+
+- `2bc1724` — "fix: switch prefix ASCII input source on the foreground client (#1016)"
+  Fixes a real macOS bug: the prefix-mode ASCII input-source switch ran in the headless
+  server, whose keyboard-input-source read is a stale per-process cache, leaving the
+  terminal on the wrong input source after using prefix commands. Forwards the switch to
+  the foreground client instead. Self-contained (17 files, adds one new protocol message
+  variant + roundtrip test), single-parent squash-merge commit — clean cherry-pick target.
+
+Cherry-picked as `b8b74c2`. One conflict (`docs/next/CHANGELOG.md`, the recurring
+Unreleased-vs-0.7.2-section conflict noted above) resolved by keeping both protocol-bump
+changelog lines. Rebuilt clean; `herdr status` protocol check against a live protocol-16
+server now reports `compatible: yes`. `live_handoff` integration tests: 14/18 pass; the 4
+failures (all named/non-default session socket paths under `/tmp`) reproduce identically
+on the pre-cherry-pick commit, confirming they're pre-existing environment flakiness, not
+a regression from this pick.
