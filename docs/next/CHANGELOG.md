@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Headless servers now resume restored agent sessions without waiting for a TUI client to attach. (#2064)
+
 ### Added
 - Added undo for a mistakenly closed tab or workspace. `prefix+u` (configurable as `keys.undo_close`) reopens the most recently closed tab, or the whole workspace when closing the last tab or pane closed it. Reopened tabs and workspaces spawn fresh shells in their saved directories; running processes and scrollback are not revived, and agents are not auto-resumed.
 - Added a sidebar "Tabs" section that lists every non-agent tab across all spaces as a two-line row (tab name over its space). Tabs can be reordered by dragging (visual only - it never changes the real tab order in any workspace), renamed by double-clicking, and scrolled when they overflow. The section collapses when there are no non-agent tabs.
