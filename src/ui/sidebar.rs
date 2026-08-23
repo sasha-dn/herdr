@@ -549,6 +549,27 @@ pub(crate) fn sidebar_pane_section_rows(app: &AppState) -> Vec<PaneSectionRow> {
     apply_pane_line_split_collapse(app, pane_section_rows_before_collapse(app))
 }
 
+/// Tabs (workspace index, tab index) whose non-agent panes are hidden from the
+/// Panes section because the tab already contributes an agent row to the Agents
+/// section. The agent rows for those tabs carry the 📟 marker instead. Pure,
+/// client-only presentation filtering.
+pub(crate) fn tabs_with_hidden_panes(app: &AppState) -> std::collections::HashSet<(usize, usize)> {
+    let agent_tabs: std::collections::HashSet<(usize, usize)> = agent_panel_entries(app)
+        .into_iter()
+        .map(|entry| (entry.ws_idx, entry.tab_idx))
+        .collect();
+    app.workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(ws_idx, ws)| {
+            ws.non_agent_panes(&app.terminals)
+                .into_iter()
+                .map(move |(tab_idx, _, _)| (ws_idx, tab_idx))
+        })
+        .filter(|key| agent_tabs.contains(key))
+        .collect()
+}
+
 /// Panes-section rows before collapse filtering: every resolvable non-agent pane
 /// (deduped by same-name-in-tab) and every line-split divider, in manual order.
 /// Serves both as the input to [`apply_pane_line_split_collapse`] and as the
@@ -564,6 +585,7 @@ fn pane_section_rows_before_collapse(app: &AppState) -> Vec<PaneSectionRow> {
             lookup.insert((ws.id.as_str(), pane_number), (ws_idx, tab_idx, pane_id));
         }
     }
+    let hidden_tabs = tabs_with_hidden_panes(app);
     let base: Vec<PaneSectionRow> = app
         .pane_section_order
         .order
@@ -572,6 +594,7 @@ fn pane_section_rows_before_collapse(app: &AppState) -> Vec<PaneSectionRow> {
         .filter_map(|(order_idx, entry)| match entry {
             ManualPaneEntry::Pane(pane_ref) => lookup
                 .get(&(pane_ref.workspace_id.as_str(), pane_ref.pane_number))
+                .filter(|&&(ws_idx, tab_idx, _)| !hidden_tabs.contains(&(ws_idx, tab_idx)))
                 .map(|&(ws_idx, tab_idx, pane_id)| {
                     PaneSectionRow::Pane(PaneSectionEntry {
                         order_idx,
@@ -3000,6 +3023,7 @@ fn render_agent_detail(
     }
 
     let rows = agent_panel_rows_from(app, terminal_runtimes);
+    let hidden_pane_tabs = tabs_with_hidden_panes(app);
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
@@ -3053,6 +3077,8 @@ fn render_agent_detail(
                 } else {
                     " "
                 };
+                let has_hidden_panes =
+                    hidden_pane_tabs.contains(&(detail.ws_idx, detail.tab_idx));
 
                 for (row_index, resolved) in resolved_rows.iter().take(height as usize).enumerate() {
                     let prefix = if row_index == 0 {
@@ -3071,6 +3097,9 @@ fn render_agent_detail(
                         p,
                         body.width.saturating_sub(display_width(&prefix) as u16) as usize,
                     ));
+                    if row_index == 0 && has_hidden_panes {
+                        spans.push(Span::styled(" 📟", Style::default()));
+                    }
                     frame.render_widget(
                         Paragraph::new(Line::from(spans)).style(row_style),
                         Rect::new(body.x, area_row.y + row_index as u16, body.width, 1),
@@ -4176,8 +4205,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .map(|entry| entry.tab_idx)
             .collect();
-        // Plain (0) and mixed (2) tabs appear; the pure-agent tab (1) does not.
-        assert_eq!(entries, vec![0, 2]);
+        // Only the plain tab (0) appears: the pure-agent tab (1) has no panes to
+        // list, and the mixed tab (2) already shows an agent row, which hides its
+        // shell pane.
+        assert_eq!(entries, vec![0]);
+        assert_eq!(
+            tabs_with_hidden_panes(&app),
+            std::collections::HashSet::from([(0, 2)])
+        );
     }
 
     /// One workspace with two non-agent panes (two tabs), reconciled into the
