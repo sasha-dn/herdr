@@ -1124,6 +1124,7 @@ pub(crate) fn command_for_key(
         .cloned()
 }
 
+#[cfg(test)]
 pub(super) fn handle_navigate_reserved_key(state: &mut AppState, key: TerminalKey) -> bool {
     let (code, modifiers) = crate::config::normalize_key_combo((key.code, key.modifiers));
     if modifiers.is_empty() {
@@ -1256,7 +1257,7 @@ pub(super) fn api_pane_direction(direction: NavDirection) -> crate::api::schema:
     }
 }
 
-#[allow(dead_code)] // exercised in input unit tests; production uses App::handle_navigate_key
+#[cfg(test)] // exercised in input unit tests; production uses App::handle_navigate_key
 pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     let mut terminal_runtimes = TerminalRuntimeRegistry::new();
     state.update_dismissed = true;
@@ -1505,6 +1506,7 @@ pub(super) fn execute_navigate_action(state: &mut AppState, action: NavigateActi
     );
 }
 
+#[cfg(test)]
 pub(super) fn execute_navigate_action_in_context(
     state: &mut AppState,
     terminal_runtimes: &mut TerminalRuntimeRegistry,
