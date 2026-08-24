@@ -521,3 +521,718 @@ server now reports `compatible: yes`. `live_handoff` integration tests: 14/18 pa
 failures (all named/non-default session socket paths under `/tmp`) reproduce identically
 on the pre-cherry-pick commit, confirming they're pre-existing environment flakiness, not
 a regression from this pick.
+
+## Follow-up audit: `2bc1724` → v0.8.2 (2026-08-24) — list only, not yet backported
+
+Continuation of the audit above. `2bc1724` (the last upstream commit incorporated, see
+directly above) is roughly 450 commits behind live `ogulcancelik/herdr` `master`, which
+has released through **v0.8.2** (2026-08-19) plus 29 further commits as of this review.
+This pass is **list-only** — nothing below has been cherry-picked yet; it's the backlog
+for the next backport round.
+
+**Scope change from the original audit**: this round classifies into four buckets
+instead of two. **Security** and **Stability** use the exact same rubric as the original
+audit above. **Notable improvement** is a *new* category, not part of that original
+rubric — real UX/feature value judged worth a personal daily-driver fork carrying it, as
+opposed to a new agent integration, a platform this fork's user doesn't run, or pure
+cosmetics. **Skip** covers everything else (docs, CI, i18n, Windows/WSL/Nix-only, new
+agent integrations, single-theme cosmetics).
+
+**Method**: cross-referenced upstream's `CHANGELOG.md` entries for every release after
+the baseline (0.7.2 through 0.8.2) against the actual new-commit list. **This method has
+a confirmed gap, found by the review pass below**: a changelog bullet whose commit
+wasn't in the naive date-filtered "new since baseline" list got silently treated as
+already-reviewed, but that date filter was flawed (see Revision note), and changelog
+bullets themselves don't cover every commit — several genuine fixes have no changelog
+line at all. Treat the totals below as a lower bound, not a complete accounting of all
+~450 commits; a full commit-by-commit pass (the method the original 194-commit audit
+above used) is the trustworthy way to close that gap and is the recommended next step
+before actually cherry-picking from this list.
+
+### Revision note (post-review)
+
+An independent codex-agent review pass (via a Herdr pane, see task notes) checked this
+section against upstream's real CHANGELOG and individual commits and found concrete
+errors, corrected here:
+
+- The initial "34 unreleased commits after v0.8.2" count was wrong (actual: **29**) —
+  caused by a string-comparison date filter (`date > "2026-08-19"`) that also matched
+  same-day commits timestamped *before* the actual v0.8.2 release commit
+  (`9eb52145`, 17:49:54Z). Fixed by using `gh api compare/v0.8.2...master` directly.
+- `adbaae68` ("reanchor pi status after session replacement", #1189) was wrongly
+  re-listed as new — it's already backported (see entry 13, fork SHA `b18cc57`, in the
+  original audit above). Root cause: the "new since baseline" list used a date filter
+  (`since=<2bc1724's commit date>`), but `2bc1724` was a *later* addition on top of the
+  original 27-commit backport, some of which (like `adbaae68`) have upstream commit
+  dates *after* `2bc1724`'s date despite being incorporated earlier. **This means the
+  same false-positive class could affect other already-backported commits with
+  post-`2bc1724` dates** — not fully re-audited against all 27 in this pass; worth
+  checking before actually cherry-picking anything below.
+- Several classifications were too generous or too strict; moved accordingly (see
+  buckets below). A representative sample of ~18 additional genuine commits the
+  changelog-bullet method missed entirely were found via targeted keyword search and
+  are now included in Stability.
+- One SHA had a typo: `52960a5b` → `52960ea5`.
+
+### Totals (revised)
+
+**~119 commits/bullets classified this pass** (of ~450 raw commits since baseline) —
+**3 Security, 39 Stability, ~29 Notable improvement, rest Skip** (Skip is *not*
+exhaustively enumerated — see Method note above).
+
+### Security (3)
+
+1. **`0f14e279`** — *fix(cli): report non-UTF-8 arguments instead of panicking* (#2207)
+   — a malformed/adversarial CLI argument crashed the process instead of erroring
+   cleanly.
+2. **`1079fff4`** — *fix: use the running binary in agent hooks* (#2722) — agent hooks
+   previously invoked whichever `herdr` binary resolved first on `PATH`, not the one
+   actually running the server; PATH-confusion class of bug.
+3. **`624dfd47`** — *fix(graphics): isolate oversized kitty images* (#3035) — bounds an
+   untrusted/oversized inbound kitty-graphics payload instead of letting it grow
+   unbounded; same family as the already-backported kitty-graphics leak fix.
+
+(`e3c3d443` and `d8838082`, originally listed here, were reclassified — see Stability
+and Notable improvement below; codex's review: `e3c3d443` is ordinary SIGPIPE handling,
+not a security boundary, and `d8838082` resolves a pane via the caller's own
+`HERDR_PANE_ID` rather than "another client's" pane — same-user/server authority either
+way, not a cross-client isolation issue as originally described.)
+
+### Stability (39)
+
+1. `f76f895e` — preserve plugin command arguments (#1613) — whitespace-only plugin args
+   were being dropped; relevant since this fork already uses plugins (`claude-tab`, etc.)
+2. `1491b7dd` — ignore nested codex session reports (#1927) — stale-session-ownership
+   class, same as several already-backported fixes
+3. `5eab32da` — restrict pi state reporting to TUI sessions (#2159)
+4. `1997b88b` — keep pending URL clicks across host focus loss (#2291)
+5. `d57cefb8` — preserve modifyOtherKeys key releases (#2303)
+6. `ee8429fb` — parse default mouse reports instead of leaking escape bytes into the pane
+   (#2312) — same bug family as the already-backported SGR-mouse-leak fix
+7. `e9222d18` — restore keyboard reporting on detach, preventing enhanced keyboard
+   sequences leaking into the shell after Herdr exits (#2395)
+8. `7ae4b056` — wait for agent prompt readiness instead of racing/reporting premature
+   readiness (#2410, #2537)
+9. `37644cab` — wait for new pane shell readiness (#2774) — same family as #8, separate
+   commit
+10. `b8387818` — derive repo name for embedded bare-repo layouts (#2657, #2660)
+11. `d46d9a22` — preserve workspace labels for root repositories across update restarts
+    (#2594, #2727)
+12. `8b635c91` — focus Copilot pane before prompting, preventing silently dropped input
+    (#2734, #1698)
+13. `a5c69bea` — eliminate redundant terminal wake work (#2962, #2550, #2901) — CPU
+    regression fix under high-rate background output / many panes
+14. `7d56b4c5` — batch kitty image row lifecycle (#3166)
+15. `20a500a7` — start lifecycle subscriptions from live events (#3134)
+16. `1c76079f` — copy selections before delayed mouse release (#3102)
+17. `2d5f91dd` — match generated characters in prefix bindings (#3085)
+18. `f72a5ef9` — keep background Claude MCP tasks working (#3094) — Claude-relevant
+19. `8fe09d5d` — preserve multiline paste in terminal attach (#3056)
+20. `ffc4e263` — add Claude screen activity fallbacks — Claude-relevant
+21. `7d35ebe7` — synchronize plugin pane pwd (#2985) — plugin-relevant
+22. `1b566016` — honor mouse capture config in terminal attach (#2995)
+23. `52960ea5` — preserve mouse forwarding through handoff (#3002)
+24. `e3c3d443` — exit quietly when output pipes close instead of panicking (#2996, was
+    listed as Security, corrected to Stability per review)
+25. `6f7ef04e` — bound stalled agent prompt waits instead of hanging indefinitely
+26. `fd29addd` — bound Linux sound player lifetime, reaping players that don't exit
+    (#1677)
+27. `6382bd43` — reject oversized text pastes safely instead of disconnecting the client
+    (#1676)
+28. `ef85fa0c` — keep reading PTY output while pane input is blocked
+29. `d4e0dd3d` — eliminate repeated workspace Git discovery, removing blocking work from
+    a hot path (#1842)
+30. `0a800b8f` — avoid blocking on foreground cwd checks (#2213)
+31. `47104169` — ignore empty clipboard writes instead of erasing existing content
+32. `b4112743` — restore terminal state on SIGHUP/SIGTERM
+33. `374d3edd` — restore blocking bridge streams, preventing immediate remote
+    disconnect (#2485)
+34. `ca1af383` — avoid abort on terminal hangup (#2427)
+35. `b660cad8` — handle remote terminal hangup cleanly (#2827)
+36. `7e4ab7b0` — prioritize shutdown requests over busy traffic, preventing shutdown
+    from blocking (#2624)
+37. `36074530` — compact large terminal redraws, preventing freezes on oversized remote
+    frames (#2675)
+38. `76211757` — reap ctrl-click URL opener child processes (#2906)
+39. `2d24950a` — isolate hidden-pane render cadence so it doesn't delay foreground
+    input (#2892)
+
+### Notable improvement (~29 SHAs, new category — see scope note above)
+
+- `38d2b078` — live filtering in keybind help (#1832)
+- `a79b3d55` — close workspace when API closes its last tab, matching TUI behavior
+  (#1899)
+- `a4b18b6e` — preserve navigate mode after pane focus change (#1993)
+- `ecddecec` — `pane read`/`pane wait-output` accept `--flag=value` and reordered
+  options (#2183)
+- `fc824b99` — recognize versioned Python agent wrappers e.g. `python3.13` (#2188)
+- `fae0b236` — ignore Cursor "Run Everything" false-blocked status (#2220)
+- `d78e3d3b`, `2d011c39` — keep collapsed workspace status visible and highlight the
+  active agent at 10+ workspaces (#2239, #2382, #2216)
+- `09cdd88d` — return focus to the pane a split was opened from (#2266)
+- `fd0e4ff4` — copy-mode `B`/`E`/`W` big-word motions (#2270)
+- `93e0086f` — search single-tab names in the session navigator (#2320)
+- `4a8a8f90` — ignore modified j/k/arrow keys in session navigator (#2377, #1981)
+- `3825c0c3` — refresh host terminal appearance on focus, keeping auto light/dark theme
+  current (#2417, #2416)
+- `4e310844` — direct pane-resize keybindings (#2558)
+- `f5067ed8` — move-tab keybind actions (#2561)
+- `2e8cc906` — anchor host IME cursor to modal name-input fields (#2569) — worth
+  prioritizing if this fork's user types non-Latin/IME input into name prompts
+- `350f0013` — `ui.window_title` keeps the outer terminal window title in sync with the
+  session (#2627)
+- `f76d7df5` — keep tab/sidebar clicks registered through a stray drag report, e.g.
+  Ghostty native fullscreen (#2736, #796)
+- `165dca45`, `a9799165`, `25e35f07` — focus-preservation fixes (closing a non-focused
+  workspace, a background workspace self-closing, background worktree removal) —
+  reclassified from Stability per review: real UX correctness, not crash/hang class
+  (#1877, #1912, #3099)
+- `f99647b2` — clear CLI error instead of a raw I/O error when no server is running
+  (#1963) — reclassified from Stability: message-clarity, not a hang/crash fix
+- `d950fdfe` — decode 0x1f as Ctrl+_ per ASCII standard (#2165) — reclassified from
+  Stability: a key-mapping correctness fix, not a leak/crash
+- `d76657f2` — speed up alternate-screen history reads (#2426) — reclassified from
+  Stability: a latency improvement, no hang/failure being fixed
+- `49e333ae`, `2075de5d` — Claude Code title-spinner/status detection fixes (#2709,
+  #2762) — reclassified from Stability: agent-status *detection* accuracy, not a
+  crash/hang class, though still worth prioritizing since this fork runs Claude Code
+- `1e1d0632`, `010afe53` — preserve navigator search query and refresh tab-bar labels
+  after a plugin rename (#1140, #1179) — reclassified from Stability: UX polish
+- `d8838082` — `pane current`/`pane get`/`pane layout --current` resolve via the
+  caller's own `HERDR_PANE_ID` instead of the UI-focused pane (#2298) — reclassified
+  from Security: same-authority correctness fix, not a client-isolation boundary
+
+### Skip — representative sample, not exhaustive
+
+- All Windows-only, WSL-only, or Nix-packaging-only fixes/features (roughly half of
+  what was reviewed): e.g. Windows Korean IME support (#1823), Windows ConPTY bundling
+  (#1828), Windows installer atomic directory swap (#2530), WSL cell-size query (#2160),
+  Nix `xcbuild` packaging (#995) — this fork builds and runs on macOS.
+- New agent integrations not currently relevant to this fork's usage: Grok CLI (#1807),
+  Antigravity CLI (#2087), Qwen Code (#2743), `3b8aeee1` Maki agent support (#1301,
+  #1302).
+- Single-locale/theme/border cosmetics: Rose Pine `surface_dim` fix (#2002), halfwidth
+  Katakana rendering (#2257), copy-mode CJK line-wrap crossing (#2145), `36a8d36a`
+  `ui.pane_outer_borders` option, `db6f301f` per-mode theme overrides, `5203a5dc` keep
+  active row visible under cursor — all reclassified from Notable improvement per
+  review: real but skippable cosmetics, not "must-add" value.
+- Detection-tuning-only fixes with no correctness or crash implication:
+  `b04c6496` (Grok Build status tuning), `2bbb7c91` (OMP scheduled-continuation status
+  tuning), `26628b6a` (published Claude detection manifest, not a runtime fix),
+  `4d17957c` (tab-bar ANSI-stripping cosmetic), `5dd20c0a` (Kiro-specific idle
+  detection) — all reclassified from Stability/Notable improvement per review.
+- `2863b715` Windows remote-attach-to-Unix-hosts support (#2329) and `b7317c97`
+  Simplified Chinese README (#1990) — reclassified from Notable improvement per review:
+  out of scope for this fork's macOS/English usage.
+- Docs/CI/release-process noise: website manifest updates, release-notes commits, CI
+  workflow hardening.
+
+**Governance note (not a code fix, flagged for awareness):** three commits in the
+reviewed range (`7c5c410b` "keep kennel authority private", `d9f6d1c5` "pin kennel
+maintainer identities", `ace91050` "remove akbash maintainer authority") modify
+`.github/MAINTAINERS`/`.github/MAINTAINER_IDS` to drop `akbash-bot` — a bot account that
+authored a large share of the commits already backported in the original audit above —
+from upstream's maintainer list. Diff-confirmed via `gh api .../commits/<sha>`; no code
+changed, not itself actionable. Worth knowing the account behind many of this fork's
+already-backported fixes no longer has upstream maintainer authority.
+
+### Known limitations of this pass
+
+- **Not a full commit audit.** ~450 raw commits exist since baseline; this pass reviewed
+  ~119 of them (those covered by a changelog bullet, plus ~18 more found through
+  targeted keyword searches during the codex review). The remainder have not been
+  individually classified and could contain more Security/Stability fixes the changelog
+  never mentioned — the review pass demonstrated this gap is real, not hypothetical.
+- **Possible additional stale "already backported" entries.** The `adbaae68` false
+  positive (see Revision note) suggests other commits from the original 27 with
+  post-`2bc1724` dates could be hiding in a future re-run's "new" list; check against
+  the original audit's SHA list above before trusting any future automated diff.
+- **Recommended next step**: before cherry-picking anything above, run a proper
+  ancestry-based diff (not date-filtered) of this fork's actual `master` against
+  upstream `master`, then classify every remaining commit individually — the same
+  method the original 194-commit audit used — rather than continuing to rely on
+  changelog coverage.
+
+---
+
+## Pass 2 — full ancestry-based audit (2026-08-24), superseding Pass 1's coverage gap
+
+Pass 1 (above) used upstream's dated `CHANGELOG.md` bullets plus a date-filter to find
+"new" commits. That method had a real, demonstrated flaw: cherry-picks get new SHAs and
+new commit dates, so a date filter cannot distinguish a genuinely new upstream commit
+from one whose *content* is already sitting in this fork under a different SHA. This
+pass replaces that method entirely and should be treated as authoritative for the range
+it covers; Pass 1's "Known limitations" section (immediately above) is resolved by this
+pass.
+
+### Corrected method
+
+1. `git fetch upstream && git fetch origin` — Pass 1's cached `upstream/master` ref was
+   confirmed stale (9450b168, itself hundreds of commits behind live upstream).
+2. **Patch-equivalence diff**, not SHA ancestry and not date-filtering:
+   `git log --cherry-pick --right-only --no-merges origin/master...upstream/master`.
+   This uses `git`'s patch-id matching to recognize a cherry-picked commit as already
+   present even under a new SHA — the correct fix for Pass 1's flaw.
+3. **Patch-id has its own limitation, handled explicitly**: any of this fork's 27
+   originally-backported commits (plus the `2bc1724` protocol-16 fix) that hit a merge
+   *conflict* during their original cherry-pick no longer has a byte-identical diff to
+   upstream's version, so patch-id matching alone still produces false positives for
+   those specific 17 commits (`045f506e`, `600753b4`, `60c04005`, `6f148588`,
+   `749e85e0`, `75ed6abc`, `80d2958a`, `8915f01c`, `aa0768b7`, `b425260f`, `b88aa130`,
+   `c78349f4`, `d64cf40c`, `d9230f51`, `e4a7095c`, `f11be93e`, `2bc1724`).
+   All 28 original upstream SHAs were explicitly excluded from the candidate list by
+   SHA regardless of what patch-id matching reported (not just the 17 above — the
+   other 11, correctly recognized as already-present by patch-id alone, were excluded
+   the same way, for a complete and verifiable list): `045f506e`, `26db26e4`,
+   `4eceb75d`, `600753b4`, `60c04005`, `64de9279`, `6f148588`, `749e85e0`, `74a771d1`,
+   `75ed6abc`, `797981c7`, `80d2958a`, `8915f01c`, `9c453427`, `9e4fdd61`, `aa0768b7`,
+   `adbaae68`, `b1d1a07b`, `b425260f`, `b88aa130`, `c78349f4`, `d5521e3d`, `d64cf40c`,
+   `d9230f51`, `e4a7095c`, `e9bcea9c`, `f11be93e`, `2bc1724` (27 original + the
+   protocol-16 fix = 28), and verified absent from the final list before classification
+   began (spot-checked by codex's independent review against 5 of the 28, all
+   confirmed correctly excluded).
+4. Raw right-only count: 492. After excluding the 28 known-already-backported SHAs:
+   **475 commits**, in chronological order, none previously reviewed.
+5. Bucketed by conventional commit prefix first (`fix`/`feat`/`perf`/`docs`/`chore`/
+   `ci`/`test`/`release`/`refactor`), then classified using the same rubric as the
+   original 194-commit audit (Security / Stability, read subject + diff when
+   ambiguous) plus Pass 1's new **Notable improvement** category (real UX/feature value
+   plausibly worth this macOS fork adopting — new integrations for agents this fork
+   actually uses, configurable keybindings/`ui.*` options — as opposed to Windows/WSL/
+   Nix-only, unused third-party-agent integrations, docs/website/CI/i18n noise, or
+   single-locale cosmetics, all Skip).
+6. `docs`(54) + `chore`(40) + `ci`(15) + `test`(12) + `release`(7) = 128 commits and all
+   20 `refactor:` commits were bulk-classified Skip after spot-checking the bucket
+   contents for anything hiding real behavior change (none found — contributor
+   approvals, org-migration/relicensing chores, docs/i18n, CI hardening, and a batch of
+   internal "route X through runtime dispatch" refactors, all behavior-neutral).
+7. All 44 Windows/WSL/ConPTY/PowerShell/Nix-only `fix:` commits Skipped — this fork
+   builds and runs on macOS only.
+
+### Totals
+
+**475 commits reviewed (1 additional commit, `4a3302d1`, explicitly out of scope —
+see Skip section). Kept: 151 (2 Security, 83 Stability, 66 Notable improvement).
+Skipped: 324. Totals below reflect codex's independent review and its
+reclassifications (originally 4/83/65 kept, 323 skipped before review).**
+
+### Security (2)
+
+Codex's independent review (below) diff-verified the original 4 and reclassified 2 to
+Stability: `6382bd43` (oversized pastes were already bounded/disconnected before this
+fix — it makes them recoverable, not a DoS/crash-boundary fix) and `0f14e279` (argv is
+caller-controlled, not untrusted external input, so the panic-avoidance framing is
+Stability, not Security). See those entries under Stability below.
+
+- `69a07fdf` — publish stable release checksums
+- `322ab6a5` — verify stable release checksums — together: stable direct installs,
+  self-updates, and remote helper downloads now require and verify the published
+  SHA-256 digest for each GitHub release asset — supply-chain integrity for the update
+  mechanism itself.
+
+### Stability (83)
+
+*Session/lifecycle ownership and agent-status correctness (same family as several
+already-backported fixes):*
+- `e608a751` — make known-agent exit process-owned
+- `1491b7dd` — ignore nested codex session reports (#1927)
+- `ac47b9e6` — resume agents after headless restore (#2088)
+- `9351b058` — reject prompts to blocked agents (#2790)
+- `20a500a7` — start lifecycle subscriptions from live events (#3134)
+- `d8838082` — resolve `pane current`/`pane get`/`layout --current` from the calling
+  pane instead of the UI-focused pane (#2298) — automation/API correctness, not a
+  client-isolation boundary (Pass 1 already reviewed this exact commit and reached the
+  same conclusion via its codex review)
+
+*Claude Code detection/status correctness (highest-relevance cluster — this is the
+fork's primary agent):*
+- `a47bc3e0` — keep Claude working during `/btw`
+- `4473e391` — detect claude confirmation prompts
+- `49e333ae` — strip claude title spinner frames (#2709)
+- `2075de5d` — detect all claude half-circle spinner frames (#2762)
+- `9ba32c25` — detect claude 2.1.228 half-circle busy spinner
+- `d742e515` *(Notable, see below — moved out of this cluster, it's a settings-format
+  fix not a detection fix)*
+
+*Codex/Copilot/OMP/agent-automation reliability (this pass includes Codex fixes given
+this very review used a Codex agent as its independent reviewer):*
+- `74db2f3a` *(Notable, see below)*
+- `4800ff54` *(Notable, see below)*
+- `7ae4b056` — wait for agent prompt readiness (#2537)
+- `37644cab` — wait for new pane shell readiness (#2774) — same race-avoidance cluster
+  as `7ae4b056`
+- `f72a5ef9` — keep background Claude MCP tasks working (#3094)
+- `b499e611` — resolve relative plugin commands from plugin root
+- `f76f895e` — preserve plugin command arguments (#1613)
+- `1079fff4` — use the running binary in agent hooks (#2722) — prevents hooks invoking
+  the wrong on-`PATH` binary, a real version-mismatch class of bug
+
+*Input/escape-sequence integrity (same class as already-backported `aa0768b7` "stop sgr
+mouse sequences leaking into panes" — spurious/duplicate characters reaching pane apps):*
+- `e98c4965` — preserve shifted punctuation for alt legacy input
+- `39ba6b7a` — preserve alt-shift letters
+- `d190c1f5` — send shifted punctuation as text in kitty mode
+- `464c658f` — reassemble split sgr mouse input
+- `5d24d0d2` — preserve escape before sgr mouse reports
+- `c1f7b6f3` — preserve lone escape input boundaries
+- `30232287` — preserve associated emoji input (#1410)
+- `ea047db8` — avoid ctrl-tab escape sequences leaking into legacy panes
+- `d950fdfe` — decode 0x1f as Ctrl+_ not Ctrl+- per ASCII standard (#2165)
+- `d277d2f8` — preserve alt-prefixed control keys (#2543)
+- `b0723b79` — preserve shift in kitty alternate reports (#2479)
+- `ee8429fb` — parse default mouse reports instead of leaking escape bytes (#2312)
+- `d57cefb8` — preserve modifyOtherKeys key releases (#2303)
+- `b76adc15` — preserve native key lifecycle across routing (#2142)
+- `adb50cba` — preserve shift-tab in pane automation (#2259) — matters for
+  programmatic agent-permission-mode cycling
+- `d004089d` — disambiguate shifted punctuation keybinds (#2676)
+- `2d5f91dd` — match generated characters in prefix bindings (#3085)
+- `19cd372f` — preserve prefix mode for modifier events
+- `b708f85e` — match shifted indexed number keybinds
+- `4a8a8f90` — ignore modified j/k/up/down in session navigator (#2377) — input was
+  being wrongly consumed instead of passed through
+- `169a4fd9` — answer XTWINOPS size queries in panes (protocol-completeness, prevents
+  pane apps misbehaving without a size-query response)
+- `89011394` — query host cell size when ioctl reports no pixels (#2160)
+- `e9222d18` — restore keyboard reporting on detach (#2395) — prevents enhanced
+  keyboard sequences leaking into the shell after Herdr exits
+- `cfa112e7` — preserve kitty associated text (#2051)
+- `0bd44502` — preserve macOS IME commits in report-all mode (#2947) — macOS-specific,
+  directly applicable to this fork
+- `58e812b2` — consume handled URL click gestures — suppresses the unmatched mouse
+  release left after a handled click, preventing duplicate actions in mouse-reporting
+  pane apps (reclassified from Skip per codex review — broader than cosmetic)
+- `1997b88b` — keep pending URL clicks handled across host focus loss (#2291) — extends
+  the same guard as `58e812b2` across a focus-loss window (reclassified from Skip)
+- `f76d7df5` — keep tab and sidebar clicks working when the terminal reports a stray
+  drag (#2736) — replaces global click/drag state with per-client state, preventing
+  concurrent clients from swallowing or completing each other's gestures (reclassified
+  from Skip per codex review — broader than minor UX)
+- `6382bd43` — reject oversized text pastes safely (#1676, refs #1665) — recoverable
+  handling of oversized pastes, not a crash/DoS boundary fix (reclassified from
+  Security per codex review)
+- `0f14e279` — report non-UTF-8 CLI arguments instead of panicking, and avoid echoing
+  malformed arguments back (#2207) — argv is caller-controlled, so this is a
+  panic-avoidance fix, not an untrusted-input security fix (reclassified from Security
+  per codex review)
+
+*Data-loss / config-diagnostic correctness (the config-diagnostic entries are direct
+follow-ons to this fork's own already-backported `f11be93e` unknown-config-key
+detector):*
+- `47104169` — ignore empty clipboard writes (#1893) — previously an empty write could
+  erase existing clipboard contents
+- `1f1e4342` — accept retired `ui.agent_panel_scope` as a known-but-retired key instead
+  of flagging it via the unknown-key detector (#2295) — this fork's own test fixtures
+  hit exactly this stale key during the original `f11be93e` backport (see Pass-0 "Test
+  fixes" section above); this is upstream's own fix for the same false-positive class
+- `bdb5222e` — report unknown *theme* names via the same diagnostic path (#2488)
+
+*Shutdown/reconnect/remote robustness:*
+- `3459798b` — extend local server startup wait
+- `7e4ab7b0` — prioritize shutdown requests (#2624)
+- `374d3edd` — restore blocking bridge streams (#2485), remote
+- `ca1af383` — avoid abort on terminal hangup (#2427) — client-side core-dump
+  prevention
+- `b660cad8` — handle remote terminal hangup (#2827) — same underlying issue (#2424)
+  as `ca1af383`, different code path
+- `08640bb3` — fall back to `sh` for remote path discovery when the login shell can't
+- `c3df61b5` — make remote helper installs shell-portable
+- `52960ea5` — preserve mouse forwarding through handoff (#3002)
+- `1b566016` — honor mouse capture config in terminal attach (#2995)
+- `7d35ebe7` — synchronize plugin pane pwd (#2985)
+- `ffc4e263` — add claude screen-activity detection fallbacks
+
+*Rendering/CPU correctness (hangs, freezes, and real CPU regressions, not pure
+micro-perf):*
+- `36074530` — compact large terminal redraws (#2675) — prevents remote clients
+  freezing when a full ANSI frame exceeds the transport limit
+- `61f64006` — repaint after transient terminal resizes
+- `d76657f2` — speed up alternate-screen history reads (#2426) — reduces read latency
+  specifically for TUI agents, directly relevant to this fork's use case
+- `a5c69bea` — eliminate redundant terminal wake work (#2962)
+- `2d24950a` — isolate hidden pane render cadence (#2892)
+- `e7c38ab3` — avoid full pane mode reads for scrollbars (#2554)
+- `b01fc37e` — avoid full pane renders for spinner animation (#1868)
+- `81f355fa` — replace agent spinners with static status marks (CPU reduction)
+- `e27a4ea4` — skip rendering hidden pty updates
+- `547aba8e` — avoid renders for passive mouse motion (#1872)
+- `8d2af4e0` — adopt libghostty integration improvements (perf)
+- `02a6e874` — batch contiguous terminal diff writes (perf)
+- `d4e0dd3d` — eliminate repeated workspace git discovery (#1842)
+- `5600197f` — avoid repeated Git config reads (#2688)
+- `e3c3d443` — exit quietly when a downstream pipe closes instead of panicking with
+  exit 101 (#2996, diff-confirmed) — crash fix, not itself an untrusted-input issue so
+  kept in Stability rather than Security
+- `3f752a72` — synchronously terminate cancelled status commands — prevents orphaned
+  background status-check processes
+
+*Workspace/pane lifecycle:*
+- `a79b3d55` — close workspace when API closes its last tab (#1899) — makes the API
+  path cascade tab→workspace closure the same way the TUI already does, avoiding a
+  workspace left open with no reachable tab
+- `76211757` — reap ctrl-click url openers after they exit (#2906) — prevents defunct
+  process accumulation
+- `ef85fa0c` — keep reading while pty input is blocked
+- `6f7ef04e` — bound stalled agent prompt waits
+- `bb29eedb` — delay agent prompt submission — prevents text sitting in the composer
+  without a turn actually starting
+- `0a800b8f` — avoid blocking on foreground cwd checks (#2213)
+- `b4112743` — restore terminal state on SIGHUP/SIGTERM
+
+### Notable improvement (66) — new category, not part of the original audit's rubric
+
+*Focus-management (high relevance given this fork's multi-agent/multi-pane workflow):*
+- `fbc3f084` focus parent after worktree removal (#1075)
+- `165dca45` preserve focus when closing a non-focused workspace (#1877)
+- `a9799165` keep focus on the current workspace when another self-closes (#1912)
+- `25e35f07` preserve focus after background worktree removal (#3099)
+- `09cdd88d` return focus to the pane a split was opened from (#2266)
+- `a4b18b6e` preserve Navigate mode during directional pane focus (#1993) — belongs with
+  this cluster (reclassified from Skip per codex review)
+
+*cwd-following (useful for how panes/tabs track a shell's actual location):*
+- `48d58648` follow cached cwd for new tabs
+- `4f7fcc48` follow foreground cwd for new terminals
+- `550e9f8c` follow foreground process group leader cwd
+- `cf3769fe` follow focused pane cwd for new workspaces
+- `9450b168` avoid rechecking cached pane cwd (#1616)
+
+*Codex-specific detection (directly relevant — this review's own independent-reviewer
+step runs as a Codex agent):*
+- `74db2f3a` detect codex working with static titles (#1574)
+- `4800ff54` detect reordered codex title spinners
+
+*Sidebar/status visibility while monitoring many agents (this fork's core use case):*
+- `d78e3d3b` keep collapsed workspace status visible (#2239)
+- `2d011c39` highlight active agent in collapsed sidebar (#2382)
+- `d2c317ad` keep active sidebar rows visible (#2794)
+- `93e0086f` search single-tab names in navigator (#2320)
+
+*Copy/paste/selection correctness:*
+- `b0d46fb9` stop copy mode line-end at text (#1411)
+- `f43a6d4a` preserve selection when auto-copy is disabled (#1496)
+- `1c76079f` copy selections before delayed mouse release (#3102)
+- `bd287b01` route VS Code Remote Tunnel copies through OSC52 (#2173)
+- `c8850a2e` add copy mode search and tmux word motions
+- `fd0e4ff4` add copy-mode big-word motions (#2270)
+- `46174563` add copy-on-select setting
+
+*Pane-app protocol/appearance completeness:*
+- `6f311498` forward pane terminal bells (#2498)
+- `10eb0bc7` propagate host color scheme to pane apps (#2214)
+- `3825c0c3` refresh host appearance on focus (#2417)
+- `503613c8` inherit host palette in pane queries (#1759)
+- `6ea68f9a` forward page keys to primary-screen pagers
+- `2e5da968` forward outer focus events to panes (#1388)
+- `4c9a3f38` forward horizontal wheel events to panes (#1402)
+- `eacea2da` page keys scroll pane scrollback at zsh/REPL prompts (#2191)
+- `bc1c052d` read alternate-screen agent history
+- `c0fb777e` report truncated pane reads (`truncated: true`)
+
+*CLI/automation ergonomics:*
+- `13cb5d9a` add shell completions
+- `5d9212a5` expose session snapshot through CLI
+- `3f809476` make agent automation a first-class CLI primitive
+- `d956a6b5` show agent targets before options in help
+- `f99647b2` report a clear CLI error when no herdr server is running (#1963)
+- `ecddecec` accept `--flag=value` and reordered options in `pane read`/`wait-output`
+  (#2183)
+- `fc824b99` recognize versioned Python agent wrappers such as `python3.13` (#2188)
+- `1bfabbab`, `1af1a5b8` — CLI help and bundled docs now point coding agents at
+  Herdr's own guide/skill
+
+*Plugin system (relevant — this fork uses the `claude-tab` and
+`vbelman.claude-resume` plugins):*
+- `d30ab1b5` add plugin-driven agent views and startup hooks
+- `1955406e` link plugins without a running server
+- `f6060cf6` scope agent skill installation
+- `947328fa` support agent environment hints (macOS)
+- `69d07dba` make plugin state global across sessions — real value, but codex review
+  found this is a **breaking migration**: existing named-session plugin state must be
+  reinstalled/relinked after adopting it, not a drop-in fix (moved here from Stability,
+  flagged as needing care, not a blind cherry-pick)
+
+*UI/keybinding configurability (real, opt-in, low-risk):*
+- `2c7c8beb` add floating popup panes
+- `38d2b078` filter keybind help (#1832)
+- `cb2e17a4` print bundled agent skill and hint next CLI steps
+- `02fe7d76` support bottom tab bar placement (#2118)
+- `f6031f7f` make pane scrollbars optional (#2166)
+- `cc9fa475` add distinct agent status indicators (#2282)
+- `4e310844` add direct pane resize keybindings (#2558)
+- `e48d8306` add configurable tab bar status (#2586)
+- `f5067ed8` add move-tab keybind actions (#2561)
+- `350f0013` keep the outer terminal window title in sync with the session (#2627)
+- `a26a6543` connected tree glyphs, workspace grouping, and search auto-select in
+  navigator
+- `15539d3d` make headless terminal size configurable (#2829)
+
+*Misc correctness worth adopting:*
+- `d742e515` preserve claude settings formatting (#2089)
+- `b8387818` derive repo name for embedded bare layouts (#2660)
+- `d46d9a22` preserve workspace labels for root repositories across update restarts
+  (#2727)
+- `952729ee` preserve logical lines in scrollback editor (#2735)
+- `e16d7d8c` preserve linked-worktree workspace labels — same correctness class as
+  `d46d9a22` (reclassified from Skip per codex review)
+- `08409d16` show the current (not stale/wrong) workspace name in its close
+  confirmation dialog — matters because this guards a destructive action (reclassified
+  from Skip per codex review)
+
+### Skip — representative sample, not exhaustive (324 total)
+
+- All 44 Windows/WSL/ConPTY/PowerShell/Nix-only `fix:` commits — this fork builds and
+  runs on macOS.
+- Reclassified to Skip per codex review (agent- or platform-specific code paths this
+  fork's actual usage doesn't touch, despite sounding stability-relevant on the
+  subject line alone): `5eab32da` (pi-lifecycle-only, not a shared code path),
+  `8b635c91` (Copilot-specific, not Claude/Codex), `38b7b540` (Linux-only,
+  `src/platform/linux.rs`), `fd29addd` (Linux `mpg123`-only), `fae0b236` (Cursor-only
+  detection tuning), `7e821ba7` (OMP/Pi integration dirs, not the `claude-tab`/
+  `vbelman.claude-resume` plugin mechanism this fork uses), `0065a0ef` (bundled Pi
+  worktree extension only). Note: the original 194-commit audit did treat several
+  Pi/OMP session-ownership fixes as in-scope Stability (shared lifecycle-arbitration
+  code, not integration-specific) — these 7 are integration-specific code, not that
+  shared class, which is why they're Skip here rather than an inconsistency with that
+  precedent.
+- 128 `docs`/`chore`/`ci`/`test`/`release` commits and 20 `refactor:` commits — website,
+  contributor-approval bot noise, org-migration/relicensing chores, i18n, CI hardening,
+  internal "route X through runtime dispatch" refactors with no behavior change.
+- Third-party-agent integrations/detection this fork doesn't use: Grok (`b04c6496`,
+  `b42c6e66`, `99760f77`), Kimi (`28b628d7`), Amp (`b03f033d`), OpenCode/OpenCode2
+  (`be901fea`, `6fb0d803`, `ccccda54`), Kiro (`5dd20c0a`), Qwen (`9e6c2b4e`),
+  `2bbb7c91` (OMP scheduled-continuation status tuning, reclassified from Stability on
+  review — detection-tuning only).
+- Pane-graphics feature cluster with no base to apply to: `88370e15` ("add isolated
+  pane graphics streaming") was itself correctly classified as a feature and not
+  backported; everything built on it — `e9cbcf2f`, `b7dca4bb`, `624dfd47`, `7d56b4c5`,
+  `1777e9bb` — has nothing to apply to in this tree, same reasoning as the original
+  audit's `e9cbcf2f` call.
+- `a22454f2` "preserve plugins during live handoff" — this fork already has its own
+  independent fix for the identical bug (confirmed in the original audit); genuinely a
+  duplicate, not new.
+- `a0a6e13f` "count ptmx master fds under devpts layouts" (#1984) — diff-confirmed this
+  is a **test-fixture** fix (a WSL2/container-specific test assertion), not a
+  production code change.
+- Single-locale/cosmetic/theme: `be1891ec` (halfwidth katakana), `f459a0df` (CJK
+  word-end edge case), `2e8cc906` (IME cursor anchor), `6c6ddcd4`/`97f8140f`/`5203a5dc`/
+  `9166e07b`/`4d17957c` (tab/row/scrollbar cosmetics), `d78e3d3b`'s sibling cosmetic
+  variants, `f83980db` (OSC4 palette index cosmetic).
+- Minor UX with no crash/hang/data-loss implication: `84855451`, `974a4817`, `552aa8ca`,
+  `7db744ab`, `cbc31d34`, `e6fa5289`, `3a8490f6`, `0cd0b1ae`, `9a4ce5e1`, `885c9a6b`
+  (dead-code removal). (`08409d16`, `e16d7d8c`, `a4b18b6e` moved to Notable improvement
+  and `58e812b2`/`1997b88b`/`f76d7df5` moved to Stability per codex review — see those
+  sections.)
+- Already reviewed and reclassified to Skip in Pass 1's codex-review step, reconfirmed
+  here: `1e1d0632`/`010afe53` (navigator search/tab-rename UX polish), `26628b6a`
+  (published detection manifest, not a runtime fix), `4d17957c` (tab-bar ANSI-stripping
+  cosmetic).
+- `c71c6c10` "resolve split current from caller pane" and `be901fea` — same calls the
+  original 194-commit audit already made on these exact SHAs (behavior/feature fixes,
+  not crash/hang).
+- Niche/dev-tooling: `de94cf83` (mise remote installs), `bbe78f51` (repo commit-hook
+  restore), `6b0e6165` (build tooling).
+- **Explicit exception, not actually classified**: `4a3302d1` (vendored `libghostty-vt`
+  bump) is *not* one of the 475 reviewed-and-classified commits despite appearing in
+  this fork's commit range — codex's review correctly flagged that folding it into
+  "Skip" without reading its diff would silently contradict the "475 reviewed" total.
+  A vendored VT-parser bump is exactly the kind of change that can carry upstream
+  security fixes; it needs its own dedicated diff review (upstream changelog for the
+  vendored version bump, not just this fork's wrapping commit) before any verdict,
+  security or otherwise.
+- Website/marketplace/docs-site features: `e1bbc252`, `82487675`, `d36a6ded`,
+  `c9676e46`, `22bb476d`, `b12da239`, `d16af266`, `79a953e9`, `eac54b84`, `a45ce225`,
+  `d6dae883`, `4cf7cff3`, `2baebb50`, `ca7ae086`, `0f10e145`, `78a356b1`.
+- Unused-relative-to-this-fork feature adds: `d0e33345` (MastraCode), `3b8aeee1`
+  (Maki), `e9b22084` (Grok CLI), `679584fd` (Antigravity), `a4d52ab6` (Qwen Code
+  detection+restore), `2863b715`/`9fac5172` (Windows-only), `db6f301f` (per-mode theme
+  overrides — reclassified from Notable in Pass 1's review, reconfirmed here as
+  cosmetic), `e0758c32` ("harden named agent cli workflows" — misleadingly named, it's
+  a large new-feature commit, not a hardening fix — same call the original 194-commit
+  audit made on this exact SHA), `5cfe5e5e`/`5b91dae1`/`b16465af`/`9c9490d7`/
+  `add6c14f`/`36a8d36a` (sidebar/theme cosmetics), `2a1a8d64` (hide single-tab row),
+  `e298e458` (workspace name prompt), `15cab964`/`56edcbcb` (low-level plugin-API
+  internals with no direct end-user value), `ef67a970` (perf commit superseded by
+  already-backported `80d2958a`, same call as the original audit).
+
+### Codex-agent independent review of this pass
+
+Spawned as a Herdr pane (`codex`, cwd `herdr-src`) with git/gh access to both remotes.
+Scope given: verify all 4 originally-classified Security entries against their actual
+diffs; spot-check 20+ Stability and 15+ Notable-improvement entries by reading diffs;
+re-verify the `a0a6e13f`/`e3c3d443` diff-confirmations specifically; and check the
+step-3 exclusion list for completeness against the original audit's 27+1 backported
+SHAs. Findings, written to `CODEX_REVIEW_PASS2.md` in this directory and folded into
+the sections above:
+
+- **Both** original Security entries were downgraded to Stability on diff inspection:
+  `6382bd43` (oversized pastes were already bounded/disconnected — this makes them
+  recoverable, not a crash/DoS-boundary fix) and `0f14e279` (argv is caller-controlled,
+  not untrusted external input). Security is now `69a07fdf`/`322ab6a5` only (release
+  checksum verification) — a smaller but more defensible bucket.
+- 7 Stability/Notable entries were scope-specific to agents or platforms this fork
+  doesn't use and were moved to Skip (`5eab32da`, `8b635c91`, `38b7b540`, `fd29addd`,
+  `fae0b236`, `7e821ba7`, `0065a0ef`) — codex read the actual diffs and found
+  Pi/Copilot/Linux/Cursor/OMP-specific code paths, not the shared logic the subject
+  lines implied.
+- `69d07dba` ("make plugin state global across sessions") is real but is a **breaking
+  migration** requiring existing named-session plugin state to be reinstalled/relinked
+  — moved from Stability to Notable improvement with that caveat attached, not a
+  blind cherry-pick candidate.
+- 3 entries were upgraded from Skip to Stability after diff review found them broader
+  than assumed: `58e812b2`, `1997b88b` (both prevent a stray mouse-release/click from
+  leaking into or duplicating actions in pane apps), and `f76d7df5` (replaces global
+  click/drag state with per-client state — a real multi-client correctness fix, not
+  cosmetic).
+- 3 entries were upgraded from Skip to Notable improvement: `08409d16` (destructive
+  close-confirmation dialog was showing a stale/wrong workspace name), `e16d7d8c`, and
+  `a4b18b6e` (belongs with the focus-management cluster).
+- `a0a6e13f` and `e3c3d443` were re-verified and confirmed as originally stated
+  (test-fixture-only, and a genuine panic fix, respectively) — no change.
+- The step-3 exclusion list was confirmed logically complete (all 28 SHAs, verified by
+  spot-check) but the document's own prose only *named* the 17 patch-id-mismatch
+  SHAs, making the other 11 look missing to a reader who didn't already know they were
+  correctly excluded by patch-id alone; fixed by listing all 28 explicitly in that
+  section — no actual gap in the exclusion, a documentation-clarity fix only.
+- `4a3302d1` (vendored `libghostty-vt` bump) was flagged as inconsistent with the
+  "475 reviewed" total while also being described as unaudited; carved out into its
+  own explicit-exception line in the Skip section rather than folded into "Skip" as if
+  reviewed.
+
+All corrections above are already applied to the Security/Stability/Notable
+improvement/Skip sections and the Totals line earlier in this Pass 2 section; nothing
+below this point needs further changes based on this review round.
+
+### Recommended next step
+
+Both this pass and Pass 1 still rely primarily on subject-line classification with
+diff-verification only on a sampled subset (this pass: the 4 Security entries in full,
+plus the ~30 Stability/Notable entries the codex review actually opened diffs for).
+Before cherry-picking anything, diff-verify the remaining Security and Stability
+entries individually — the same per-commit rigor the original 194-commit audit applied
+throughout — since a category with only 2 Security and 83 Stability commits is a
+tractable size for that pass. `4a3302d1` (vendored `libghostty-vt` bump) also still
+needs its own dedicated look before any release, per the exception note above.
+
+## Scope decision (2026-08-24): what actually gets cherry-picked next
+
+Owner decision, made after reviewing the Pass 2 category breakdown above, on what to
+actually backport (superseding the "recommended next step" above — no separate
+dedicated diff-verification pass; verification happens during cherry-picking itself,
+same as the original 27-commit backport):
+
+- **Security (2)** — both, in full.
+- **Stability (83)** — all, in full.
+- **Notable improvement — included groups**: Focus-management (6), cwd-following (5),
+  Codex-specific detection (2), Sidebar/status visibility (4), Copy/paste/selection
+  (7), Pane-app protocol/appearance (10), Plugin system **excluding** the breaking
+  migration `69d07dba` (4 of 5), Misc correctness (6). **44 commits total.**
+- **Notable improvement — explicitly excluded for now**: CLI/automation ergonomics
+  (8), UI/keybinding configurability (12), and `69d07dba` (breaking plugin-state
+  migration, needs its own explicit go/no-go later) — **21 commits deferred, not
+  rejected.**
+- **`4a3302d1`** (vendored `libghostty-vt` bump) — still excluded pending its own
+  dedicated look, per the exception note above.
+
+**Total scoped for this backport round: 129 commits** (2 + 83 + 44).
+
