@@ -2,47 +2,6 @@
 
 ## Unreleased
 
-### Fixed
-- Claude Code confirmation prompts using `Enter to confirm · Esc to cancel` now report `blocked` instead of `idle`. (#2268)
-- Headless servers now resume restored agent sessions without waiting for a TUI client to attach. (#2064)
-
-## [0.8.0] - 2026-08-03
-
-### Added
-- Added `herdr --skill` to print the agent skill bundled with the running Herdr binary.
-- Added `ui.pane_scrollbars = false` to hide terminal pane scrollbars and reclaim their reserved column. (#2167)
-- Added `ui.tab_bar_position = "bottom"` to place the desktop tab row below terminal panes. (#2117)
-- Added live filtering to the keybind help with `/`, Backspace, and `Ctrl+U`. (#1825, #1832, thanks @corrius)
-- Added Windows support for `experimental.switch_ascii_input_source_in_prefix` with Korean IMEs. (#1802, #1823, thanks @joonhwan)
-- Added Grok CLI session reporting and native restore with `grok --resume <id>`. (#1800, #1807, thanks @carlesso)
-- Added Antigravity CLI session reporting and native restore with `agy --conversation <id>`. (#1011, #1571, #2087, thanks @ludoo)
-- Added automatic text history reads for idle alternate-screen agents, with the application viewport restored after collection.
-- Added `workspace.move_block`, the `workspace.reordered` event, and atomic worktree-group reordering. (#1694)
-- Added a Simplified Chinese README. (#1990, thanks @patrick-xin)
-
-### Changed
-- Experimental options are no longer exposed in the Settings TUI and remain available through the config file.
-- Agent status indicators now use the same static workspace marks across the sidebar, navigator, and mobile views, eliminating continuous spinner rendering while agents work.
-- Hidden pane output no longer triggers unnecessary TUI rendering.
-- Windows preview downloads now include Herdr and a modern app-local ConPTY runtime in one archive. (#1533, #1644, #1828)
-- Worktree parents and children now stay packed together in the sidebar, including while groups are reordered.
-- Public documentation now separates stable, preview, and immutable versioned release snapshots.
-- Repository and installation links now use `herdrdev/herdr` after the GitHub organization migration.
-- Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
-
-### Fixed
-- Pane applications now receive semantic light/dark query responses and live Mode 2031 updates when the host appearance changes. (#714)
-- Remote attach now falls back to `sh` when the login shell cannot perform path discovery. (#1201)
-- PTY output continues to be read while pane input is temporarily blocked. (#1295)
-- Worktree CLI help and docs no longer advertise the redundant `--json` flag; worktree commands remain JSON-only and continue accepting the flag for compatibility. (#2171)
-- OpenCode 2 preview panes now appear as OpenCode agents and use the existing OpenCode status detection. (#2169)
-- Pane text copied through VS Code Remote Tunnels now reaches the viewing machine's clipboard instead of overwriting the remote host clipboard. (#2015)
-- Windows agent detection now follows Git Bash-launched agents across emulated `exec` process boundaries. (#2107)
-- Detached Windows servers and pane processes now survive logout from the OpenSSH session that started them. (#2008)
-- Windows `agent start` now launches agents without native arguments instead of timing out on an invalid empty PowerShell argument list. (#2072)
->>>>>>> 4473e391 (fix: detect claude confirmation prompts)
-- Headless servers now resume restored agent sessions without waiting for a TUI client to attach. (#2064)
-
 ### Added
 - Added undo for a mistakenly closed tab or workspace. `prefix+u` (configurable as `keys.undo_close`) reopens the most recently closed tab, or the whole workspace when closing the last tab or pane closed it. Reopened tabs and workspaces spawn fresh shells in their saved directories; running processes and scrollback are not revived, and agents are not auto-resumed.
 - Added a sidebar "Tabs" section that lists every non-agent tab across all spaces as a two-line row (tab name over its space). Tabs can be reordered by dragging (visual only - it never changes the real tab order in any workspace), renamed by double-clicking, and scrolled when they overflow. The section collapses when there are no non-agent tabs.
@@ -50,6 +9,8 @@
 ### Fixed
 - `herdr config check` now reports unknown config keys with their full paths instead of treating ignored typos as valid configuration. (#1573)
 - `herdr wait agent-status` now returns `pane_not_found` promptly when its target pane closes instead of waiting for the full timeout. (#1439)
+- Headless servers now resume restored agent sessions without waiting for a TUI client to attach. (#2064)
+- Claude Code confirmation prompts using `Enter to confirm · Esc to cancel` now report `blocked` instead of `idle`. (#2268)
 - Plain PageUp/PageDown now reach primary-screen pager apps such as `less -X` and Git diff when they enter application cursor mode, while shell transcripts still use Herdr pane scrollback. (#953)
 - Shifted punctuation such as `!`, `?`, and `:` are now sent as literal text to Kitty-keyboard-mode pane apps, fixing Kiro CLI TUI prompts while preserving modified key chords. (#1105)
 - `herdr --remote` now installs remote helper binaries without routing the binary stream through a multiline `/bin/sh -c` command, fixing installs for non-POSIX login shells such as xonsh. (#1203, thanks @nhumrich)
