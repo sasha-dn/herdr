@@ -2683,31 +2683,11 @@ mod tests {
         assert!(cmd.get_env("CODEX_THREAD_ID").is_none());
     }
 
-    #[tokio::test]
-    async fn cwd_returns_accepted_report_without_rechecking_filesystem() {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock should be after unix epoch")
-            .as_nanos();
-        let cwd = std::env::temp_dir().join(format!(
-            "herdr-reported-cwd-cache-{}-{stamp}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&cwd).expect("create reported cwd");
-
-        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
-        let (events, _event_rx) = mpsc::channel(1);
-        publish_reported_cwd(runtime.pane_id, cwd.clone(), &runtime.reported_cwd, &events);
-        assert_eq!(
-            runtime.reported_cwd.lock().unwrap().as_ref(),
-            Some(&cwd),
-            "test setup must pass cache admission"
-        );
-
-        std::fs::remove_dir(&cwd).expect("remove reported cwd after admission");
-
-        assert_eq!(runtime.cwd(), Some(cwd));
-    }
+    // `cwd_returns_accepted_report_without_rechecking_filesystem` also dropped from
+    // this cherry-pick (1491b7dd), same reason as the follow_cwd test below: it
+    // exercises cached-cwd-without-rechecking behavior that this fork doesn't have
+    // yet — added by `9450b168` ("avoid rechecking cached pane cwd"), scheduled for
+    // the Notable-improvement phase. Re-add once that lands.
 
     // `follow_cwd_falls_back_to_reported_pane_cwd_without_foreground_group` deliberately
     // dropped from this cherry-pick (1491b7dd): it asserts on `PaneRuntime::follow_cwd`,
