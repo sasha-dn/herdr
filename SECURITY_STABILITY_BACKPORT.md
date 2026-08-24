@@ -1236,3 +1236,117 @@ same as the original 27-commit backport):
 
 **Total scoped for this backport round: 129 commits** (2 + 83 + 44).
 
+## Phase 1 — Security (2026-08-24)
+
+Branch `backport-pass2-20260824`, off `origin/master` at `2c8c6731`.
+
+Both Security commits landed, but neither cherry-picked cleanly as-is — both needed
+scoping/adaptation, and an independent codex review (spawned as a Herdr pane) then
+found the scoping had been cut too narrowly on the first pass. Final state:
+
+- **`69a07fdf`** ("publish stable release checksums") — **not backported.** Pure
+  `website/latest.json` data for upstream's own release identity (version, asset
+  URLs) — no reusable code, and adopting the data verbatim would misrepresent this
+  fork's own (unpublished) build as upstream's 0.8.0 release.
+- **`322ab6a5`** ("verify stable release checksums") — adopted in **two** separate
+  commits after the review found the first one incomplete:
+  - `2c8c6731` — the core fix: `src/update.rs`'s stable self-update path now rejects
+    a manifest asset missing a `sha256` field instead of silently installing it
+    unverified. Deliberately **not** adopted from the same upstream commit: the
+    `website/latest.json`/`install.sh`/`install.ps1`/`scripts/changelog.py`/`justfile`
+    release-pipeline changes (see below), and upstream's top-level `manifest.sha256`
+    map fallback (this fork only supports the simpler inline per-asset form; no
+    verification bypass results, just narrower manifest-format support).
+  - `fb36cc12` — **codex review finding, High severity**: the same commit's
+    `src/remote/attach.rs` hunk (this fork's equivalent is `src/remote/unix.rs`) was
+    missed entirely on the first pass, leaving the identical unverified-install gap
+    open on the `herdr --remote` SSH-install path. Adopted the same enforcement there.
+- Also required an unplanned build-fix, `dc009faf`: the branch's build was already
+  broken before this task's Phase 1 work started — a conflict-resolution defect in
+  an earlier, unrelated commit (`08ed0acc`, landed before this backport round properly
+  began) left `navigate.rs`'s test-only `handle_navigate_key` free function calling
+  helpers that a correct upstream refactor had scoped to `#[cfg(test)]`. Fixed by
+  gating the fork's own free function (and its two now-orphaned helpers) the same
+  way, matching its own doc comment ("exercised in input unit tests"). No behavior
+  change; build-fix only.
+
+**Codex review's other findings, not acted on / lower priority**:
+- **High** — `scripts/changelog.py`/`.github/workflows/release.yml` still produce a
+  checksum-free manifest; if this fork ever cuts a release through that inherited
+  pipeline, the now-mandatory consumer would reject it. Checked whether this is a live
+  risk: `sasha-dn/herdr` has **zero GitHub releases and zero release-workflow runs
+  ever** (confirmed via `gh api`), so this is a latent inconsistency in inherited,
+  never-exercised CI, not an active vulnerability. Left unfixed for now — worth
+  closing before this fork's first real release, not urgent today.
+- **High** — `website/install.sh` drops verification too; same "never actually
+  deployed" caveat applies (`has_pages: false`, no Cloudflare Pages deploy has run).
+  Not fixed this round.
+- **Medium** — dropping the top-level `manifest.sha256` map fallback narrows format
+  support but introduces no bypass (noted above as a deliberate, documented choice).
+- **Medium** — test coverage gap: the new tests cover the enforcement logic itself
+  but not the checked-in manifest, remote path, or installer scripts end-to-end.
+
+**Build/test**: `cargo check --all-targets` clean (only the same 8 pre-existing
+dead-code warnings present since before this backport round, confirmed unrelated —
+see Phase 2 below). `cargo test --bins`: same two pre-existing/environment-specific
+failures as every prior pass (`dispatched_request_reports_response_write_completion`,
+`pane_border_renderer_places_adjacent_cjk_by_display_width`), no new failures.
+
+## Phase 2 — Stability, partial (2026-08-24)
+
+Delegated to a background agent with instructions to batch in groups of ~10-12,
+hard-cap effort per commit, and check build health after each batch. **13 of 83
+landed** before the run ended without producing its planned write-up (its own final
+summary was truncated/incomplete — likely ran out of runway mid-task, not a clean
+stop). Commits landed, oldest to newest:
+
+`8ba63696` `51384af4` `1a98102f` `52468f94` `08ed0acc` `c530b5cc` `a8ef9f5d`
+(these last few were already on the branch from an earlier, separately-killed run —
+see the branch's own history for exact provenance) — then this run's own batch:
+`71b2fc4b` `de7df0c6` `770da5d7` `4c0746e9` `dda83845` `4caf45dc` `1ac5885e`
+`b7dd14e2` `48ff4262` `77301bbd` `cef79b9d` `4f69cfa0` `a2dbd92e`.
+
+One self-correction already visible in that list: `1ac5885e` ("repair CHANGELOG.md
+corruption from an earlier commit in this backport") — the run caught and fixed its
+own mistake mid-batch, which is a good sign for the commits it did finish, but is not
+a substitute for independent review (none was run on Phase 2 yet — see below).
+
+**Picking up manually where it left off surfaced a real ordering problem the
+changelog-driven audit couldn't have caught**: the next commit in the list,
+**`ea047db8`** ("avoid ctrl-tab escape sequences in legacy panes"), doesn't apply
+against this fork's current tree — its diff assumes the `encode_terminal_key` /
+`encode_terminal_key_once` split (repeat-count handling, Windows ConPTY fallback)
+that upstream introduced via **`b76adc15`** ("preserve native key lifecycle across
+routing", #2142, also in this Stability(83) list at a *later* line than `ea047db8`,
+despite predating it by 5 days upstream). `ea047db8` is a prerequisite-dependent
+commit that needs `b76adc15` applied first — the same class of issue the original
+194-commit audit called out explicitly (see "Commits added during cherry-picking"
+near the top of this document).
+
+`b76adc15` itself does not cherry-pick cleanly: conflicts in `src/raw_input.rs`,
+`src/server/client_transport.rs`, `src/server/headless.rs`, `tests/api_ping.rs`,
+`tests/support/mod.rs`, plus a modify/delete conflict on `tests/cli/sessions.rs`
+(deleted in this fork's own history, modified by `b76adc15` upstream). This is a
+large, non-trivial reconciliation — **deliberately not attempted in this session**,
+per the same "stop and report rather than grind" discipline given to the delegated
+run. **`ea047db8` and `b76adc15` are both deferred, not dropped** — they need a
+dedicated pass that first understands why this fork deleted `tests/cli/sessions.rs`
+before reconciling the rest of `b76adc15`'s conflicts.
+
+**Remaining Stability backlog**: 83 − 13 landed − 2 deferred = **68 commits not yet
+attempted**, plus 44 Notable improvements not yet started, plus the codex review this
+phase still needs (per the leaner one-reviewer-pass-per-phase structure agreed for
+this round — not run yet, since the phase isn't finished).
+
+**Operational note for whoever continues this**: mid-session, a manual conflict
+investigation (aborting and retrying `ea047db8`/`b76adc15`) accidentally destroyed an
+already-written, not-yet-committed fix (`fb36cc12`'s content, at the time uncommitted)
+via `git cherry-pick --abort`, which hard-resets the working tree to `HEAD` —
+including unrelated uncommitted changes, not just the conflicted files. It was
+recovered by reapplying the same edit and committing immediately. **Lesson: commit or
+stash any unrelated working-tree changes before attempting a cherry-pick that might
+need `--abort`.**
+
+**Build/test**: clean at `fb36cc12` (see Phase 1's build/test note above — same
+result, no regressions from the 13 landed Stability commits).
+
