@@ -362,6 +362,9 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         .get(&asset_key)
         .ok_or_else(|| format!("no binary for {asset_key} in update manifest"))?;
     let download_url = asset.url.clone();
+    let sha256 = asset.sha256.clone().ok_or_else(|| {
+        format!("update manifest asset {asset_key} is missing a SHA-256 checksum")
+    })?;
 
     Ok(Some(ReleaseInfo {
         identity: latest.to_string(),
@@ -372,7 +375,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         #[cfg(not(windows))]
         target_protocol: manifest.protocol,
         download_url,
-        sha256: asset.sha256.clone(),
+        sha256: Some(sha256),
         notes_body,
     }))
 }
@@ -3321,6 +3324,26 @@ mod tests {
     }
 
     #[test]
+    fn stable_update_requires_asset_checksum() {
+        let (os, arch) = platform_target();
+        let asset_key = format!("{os}-{arch}");
+        let json = format!(
+            r####"{{
+                "version": "99.99.99",
+                "notes": "### Changed\n- One",
+                "assets": {{
+                    "{asset_key}": "https://example.com/herdr"
+                }}
+            }}"####
+        );
+        let manifest: UpdateManifest = serde_json::from_str(&json).unwrap();
+
+        assert!(release_info_from_manifest(&manifest)
+            .unwrap_err()
+            .contains("missing a SHA-256 checksum"));
+    }
+
+    #[test]
     fn invalid_manifest_announcement_does_not_block_release_info() {
         let (os, arch) = platform_target();
         let asset_key = format!("{os}-{arch}");
@@ -3335,7 +3358,10 @@ mod tests {
                     "body": "### Heads up\n- Defaults changed"
                 }},
                 "assets": {{
-                    "{asset_key}": "https://example.com/herdr"
+                    "{asset_key}": {{
+                        "url": "https://example.com/herdr",
+                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }}
                 }}
             }}"####
         );
