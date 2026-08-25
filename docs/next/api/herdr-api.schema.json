@@ -1229,6 +1229,23 @@
     },
     "request": {
       "$defs": {
+        "AgentChildrenParams": {
+          "properties": {
+            "recursive": {
+              "default": false,
+              "description": "When true, return the whole descendant subtree in preorder (children,\ntheir children, and so on); otherwise return only the direct children.",
+              "type": "boolean"
+            },
+            "target": {
+              "description": "Target of the agent whose children to list (terminal id, public pane id\nlike `\"w1:p2\"`, or agent name).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1339,6 +1356,23 @@
           ],
           "type": "object"
         },
+        "AgentSetParentParams": {
+          "properties": {
+            "parent": {
+              "description": "Target of the agent to record as `target`'s parent, resolved with the\nsame rules. Assigns or changes the parent link; it never clears it.",
+              "type": "string"
+            },
+            "target": {
+              "description": "Target of the agent whose parent is being set (terminal id, public pane\nid like `\"w1:p2\"`, or agent name).",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "parent"
+          ],
+          "type": "object"
+        },
         "AgentStartParams": {
           "properties": {
             "args": {
@@ -1355,6 +1389,13 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "parent": {
+              "description": "Target of an existing agent pane (terminal id, public pane id like\n`\"w1:p2\"`, or agent name). Recorded as this agent's parent in the\nagents-panel tree.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "timeout_ms": {
               "description": "Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.",
@@ -5050,6 +5091,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentViewClearParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.set_parent",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentSetParentParams"
             }
           },
           "required": [

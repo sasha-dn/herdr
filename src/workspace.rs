@@ -1567,17 +1567,16 @@ mod tests {
 
     #[test]
     fn generated_workspace_ids_are_short_base32_handles() {
+        // NEXT_WORKSPACE_ID is a process-global counter shared with every other
+        // test in this binary, so its current value (and thus encoded length)
+        // is order-dependent; encode_public_number's length behavior for small
+        // values is covered separately by public_numbers_round_trip_readable_base32_handles.
         let first = generate_workspace_id();
         let second = generate_workspace_id();
 
         assert!(first.starts_with('w'));
         assert!(second.starts_with('w'));
         assert_ne!(first, second);
-        assert!(first.len() <= 3, "unexpectedly long workspace id: {first}");
-        assert!(
-            second.len() <= 3,
-            "unexpectedly long workspace id: {second}"
-        );
     }
 
     #[test]
