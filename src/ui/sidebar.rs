@@ -3079,6 +3079,7 @@ fn render_agent_detail(
                 };
                 let has_hidden_panes =
                     hidden_pane_tabs.contains(&(detail.ws_idx, detail.tab_idx));
+                const HIDDEN_PANES_MARKER: &str = " 📟";
 
                 for (row_index, resolved) in resolved_rows.iter().take(height as usize).enumerate() {
                     let prefix = if row_index == 0 {
@@ -3086,6 +3087,12 @@ fn render_agent_detail(
                     } else {
                         format!("{indent}   ")
                     };
+                    let marker_width = if row_index == 0 && has_hidden_panes {
+                        display_width(HIDDEN_PANES_MARKER) as u16
+                    } else {
+                        0
+                    };
+                    let reserved = display_width(&prefix) as u16 + marker_width;
                     let mut spans = vec![Span::raw(prefix.clone())];
                     spans.extend(resolved_token_spans(
                         resolved,
@@ -3095,10 +3102,10 @@ fn render_agent_detail(
                         agent_style,
                         agent_style,
                         p,
-                        body.width.saturating_sub(display_width(&prefix) as u16) as usize,
+                        body.width.saturating_sub(reserved) as usize,
                     ));
                     if row_index == 0 && has_hidden_panes {
-                        spans.push(Span::styled(" 📟", Style::default()));
+                        spans.push(Span::styled(HIDDEN_PANES_MARKER, Style::default()));
                     }
                     frame.render_widget(
                         Paragraph::new(Line::from(spans)).style(row_style),
@@ -4212,6 +4219,39 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             tabs_with_hidden_panes(&app),
             std::collections::HashSet::from([(0, 2)])
+        );
+    }
+
+    #[test]
+    fn hidden_panes_marker_is_not_clipped_by_a_full_width_tab_name() {
+        // A tab name long enough that the icon/workspace/tab row already fills
+        // the whole row width. The 📟 marker must still be reserved room and
+        // appear, not silently overflow past the render area.
+        let mut app = AppState::test_new();
+        let mut ws = Workspace::test_new("a-fairly-long-workspace-name");
+        let agent_pane = ws.tabs[0].root_pane;
+        let shell_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
+        ws.tabs[0].set_custom_name("a-fairly-long-tab-name".into());
+        app.workspaces = vec![ws];
+        app.ensure_test_terminals();
+        mark_pane_agent(&mut app, agent_pane);
+        let _ = shell_pane; // stays a plain shell pane so the tab is mixed
+        app.active = Some(0);
+        app.selected = 0;
+
+        let area = Rect::new(0, 0, 26, 6);
+        let mut terminal = Terminal::new(TestBackend::new(26, 6)).expect("test terminal");
+        let runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &runtimes, frame, area))
+            .expect("agent detail should render");
+
+        let buffer = terminal.backend().buffer();
+        let has_marker = (0..area.width)
+            .any(|x| (0..area.height).any(|y| buffer[(x, y)].symbol() == "📟"));
+        assert!(
+            has_marker,
+            "hidden-panes marker must not be clipped off by a full-width tab name"
         );
     }
 

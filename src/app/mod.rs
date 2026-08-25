@@ -5129,12 +5129,9 @@ mod tests {
             app.terminal_runtimes.insert(terminal_id, runtime);
             receivers.push(receiver);
         }
-        let pane_id_of = |app: &crate::app::App, pane_id: crate::layout::PaneId| -> String {
-            app.pane_info(0, pane_id).unwrap().pane_id
-        };
-        let root_pane_id = pane_id_of(&app, pane_a);
-        let child_pane_id = pane_id_of(&app, pane_b);
-        let other_pane_id = pane_id_of(&app, pane_c);
+        let root_pane_id = app.pane_info(0, pane_a).unwrap().pane_id;
+        let child_pane_id = app.pane_info(0, pane_b).unwrap().pane_id;
+        let other_pane_id = app.pane_info(0, pane_c).unwrap().pane_id;
 
         let start = |app: &mut crate::app::App, name: &str, pane_id: String| -> String {
             let response = app.handle_api_request(crate::api::schema::Request {
@@ -5264,12 +5261,9 @@ mod tests {
             app.terminal_runtimes.insert(terminal_id, runtime);
             receivers.push(receiver);
         }
-        let pane_id_of = |app: &crate::app::App, pane_id: crate::layout::PaneId| -> String {
-            app.pane_info(0, pane_id).unwrap().pane_id
-        };
-        let root_pane_id = pane_id_of(&app, pane_b);
-        let child_pane_id = pane_id_of(&app, pane_c);
-        let grandchild_pane_id = pane_id_of(&app, pane_d);
+        let root_pane_id = app.pane_info(0, pane_b).unwrap().pane_id;
+        let child_pane_id = app.pane_info(0, pane_c).unwrap().pane_id;
+        let grandchild_pane_id = app.pane_info(0, pane_d).unwrap().pane_id;
 
         let start = |app: &mut crate::app::App, name: &str, pane_id: String| -> String {
             let response = app.handle_api_request(crate::api::schema::Request {

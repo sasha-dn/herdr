@@ -310,15 +310,13 @@ impl App {
         // stable parent link on the target pane once the agent starts, driving
         // the agents-panel tree; it does not affect where the pane itself lives.
         let parent_ref = if let Some(parent_target) = params.parent.as_deref() {
-            let resolved = self.resolve_terminal_target(parent_target).map_err(|_| {
-                AgentStartError::ParentNotFound {
-                    target: parent_target.to_string(),
-                }
-            })?;
+            let resolved = self
+                .resolve_terminal_target(parent_target)
+                .map_err(AgentStartError::Parent)?;
             let parent_ws = self.state.workspaces.get(resolved.ws_idx).ok_or_else(|| {
-                AgentStartError::ParentNotFound {
+                AgentStartError::Parent(TerminalTargetError::NotFound {
                     target: parent_target.to_string(),
-                }
+                })
             })?;
             let is_agent = parent_ws
                 .pane_state(resolved.pane_id)
@@ -331,9 +329,9 @@ impl App {
                     pane_number,
                 }),
                 _ => {
-                    return Err(AgentStartError::ParentNotFound {
+                    return Err(AgentStartError::Parent(TerminalTargetError::NotFound {
                         target: parent_target.to_string(),
-                    })
+                    }))
                 }
             }
         } else {
@@ -442,10 +440,13 @@ impl App {
                 code: "agent_start_input_failed".into(),
                 message,
             },
-            AgentStartError::ParentNotFound { target } => crate::api::schema::ErrorBody {
-                code: "agent_parent_not_found".into(),
-                message: format!("agent parent target {target} not found"),
-            },
+            AgentStartError::Parent(TerminalTargetError::NotFound { target }) => {
+                crate::api::schema::ErrorBody {
+                    code: "agent_parent_not_found".into(),
+                    message: format!("agent parent target {target} not found"),
+                }
+            }
+            AgentStartError::Parent(err) => self.agent_target_error_body(err),
             AgentStartError::DuplicateName { name, candidates } => crate::api::schema::ErrorBody {
                 code: "agent_name_taken".into(),
                 message: format!(
@@ -667,9 +668,7 @@ pub(super) enum AgentStartError {
     TargetBusy(String),
     TargetUnavailable(String),
     InputFailed(String),
-    ParentNotFound {
-        target: String,
-    },
+    Parent(TerminalTargetError),
     DuplicateName {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
