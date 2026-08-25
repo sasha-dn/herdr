@@ -104,8 +104,11 @@ fn write_requested_help(
 
     selected.set_bin_name(path.join(" "));
     before_write();
-    selected.write_long_help(&mut *output)?;
-    writeln!(output)?;
+    let result = selected
+        .write_long_help(&mut *output)
+        .and_then(|()| writeln!(output));
+    crate::platform::end_cli_output();
+    result?;
     Ok(true)
 }
 

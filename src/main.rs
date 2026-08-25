@@ -727,24 +727,28 @@ fn main() -> io::Result<()> {
         println!("Home:   https://herdr.dev");
         println!();
         println!("{}", cli::AGENT_HELP_FOOTER);
+        platform::end_cli_output();
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--version" || a == "-V") {
         platform::begin_cli_output();
         println!("herdr {}", crate::build_info::version());
+        platform::end_cli_output();
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--default-config") {
         platform::begin_cli_output();
         print!("{DEFAULT_CONFIG}");
+        platform::end_cli_output();
         return Ok(());
     }
 
     if args.iter().any(|a| a == "--skill") {
         platform::begin_cli_output();
         print!("{SKILL}");
+        platform::end_cli_output();
         return Ok(());
     }
 

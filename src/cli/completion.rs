@@ -41,6 +41,7 @@ pub(super) fn run_completion_command(args: &[String]) -> std::io::Result<i32> {
         crate::platform::begin_cli_output();
         generate(shell, &mut command, "herdr", &mut std::io::stdout());
     }
+    crate::platform::end_cli_output();
     Ok(0)
 }
 

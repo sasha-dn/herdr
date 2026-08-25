@@ -12,6 +12,7 @@ macro_rules! print {
     ($($arg:tt)*) => {{
         crate::platform::begin_cli_output();
         std::print!($($arg)*);
+        crate::platform::end_cli_output();
     }};
 }
 
@@ -19,6 +20,7 @@ macro_rules! println {
     ($($arg:tt)*) => {{
         crate::platform::begin_cli_output();
         std::println!($($arg)*);
+        crate::platform::end_cli_output();
     }};
 }
 
